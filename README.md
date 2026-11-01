@@ -60,6 +60,9 @@ bash install.sh
 # Check Knowledge Graph status & unlinked node count in the 500-node slice
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --status
 
+# Beautify & Balance Layout into 6 Thematic Constellations (Recommended)
+node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --beautify
+
 # Auto-link all unlinked nodes & rebuild graph snapshot (0 external LLM tokens)
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --auto
 

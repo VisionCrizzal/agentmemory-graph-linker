@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
- * AgentMemory Knowledge Graph Linker
+ * AgentMemory Knowledge Graph Linker & Beautifier
  * Zero-Token / Lightweight-Model Graph Linker for Antigravity (Gemini 3.8 Flash High)
  *
  * Usage:
  *   node graph-linker.mjs --status
  *   node graph-linker.mjs --auto
+ *   node graph-linker.mjs --beautify
  *   node graph-linker.mjs --dump
  *   node graph-linker.mjs --apply '<json_relations_array>'
  */
@@ -46,6 +47,83 @@ function normalizeRelation(rel) {
   return VALID_RELATIONS.has(clean) ? clean : "related_to";
 }
 
+// 6 Thematic Domain Constellations for Balanced Layout
+const THEMATIC_DOMAINS = [
+  {
+    id: "ai_models",
+    label: "AI Models & Smart Router",
+    anchor: { name: "Smart AI Router", type: "pattern" },
+    subAnchor: { name: "OpenAI chat completions API", type: "concept" },
+    keywords: [
+      "groq", "gemini", "gemma", "qwen", "openai", "token", "prompt", "completion",
+      "router", "embedding", "tpm", "tpd", "rate limit", "llm", "ai", "model"
+    ]
+  },
+  {
+    id: "agentmemory",
+    label: "AgentMemory System Core",
+    anchor: { name: "agentmemory module", type: "concept" },
+    subAnchor: { name: "agent memory implementation", type: "concept" },
+    keywords: [
+      "agentmemory", "summarize", "compress", "state_store", "metrics", "graph-extract",
+      "observation", "session", "kv", "health", "doctor", "sqlite", "sync"
+    ]
+  },
+  {
+    id: "mobile_nodes",
+    label: "Mobile & Remote AI Ecosystem",
+    anchor: { name: "Samsung Galaxy Z Fold 3", type: "concept" },
+    subAnchor: { name: "CleanYourTV", type: "concept" },
+    keywords: [
+      "samsung", "fold", "termux", "ssh", "adb", "android", "tv", "cleanyourtv",
+      "scrcpy", "canta", "shizuku", "battery", "phantom"
+    ]
+  },
+  {
+    id: "flutter_ui",
+    label: "Flutter Architecture & UI",
+    anchor: { name: "Flutter", type: "concept" },
+    subAnchor: { name: "ShopEasy Architecture", type: "concept" },
+    keywords: [
+      "flutter", "dart", "shopeasy", "ui", "widget", "theme", "material", "carousel",
+      "screen", "splash", "menu_page", "color", "layout"
+    ]
+  },
+  {
+    id: "macos_audio",
+    label: "macOS CoreAudio & Hardware",
+    anchor: { name: "MacBook Pro", type: "concept" },
+    subAnchor: { name: "CoreAudio HAL", type: "concept" },
+    keywords: [
+      "audio", "coreaudio", "hal", "ark", "driver", "amcp", "plug-in", "volume",
+      "applescript", "macbook", "dgpu", "thermal", "kernel", "fedora", "coreaudiod"
+    ]
+  },
+  {
+    id: "dev_tooling",
+    label: "Dev Tools & Automation",
+    anchor: { name: "Antigravity Skill", type: "concept" },
+    subAnchor: { name: "call_mcp_tool", type: "concept" },
+    keywords: [
+      "git", "npm", "node", "mcp", "tool", "run_command", "bash", "cli", "launchctl",
+      "plist", "service", "workflow", "config", "settings", "json", "yaml"
+    ]
+  }
+];
+
+// Central Backbone Bridges connecting the 6 domain anchors into a harmonic constellation
+const INTER_CLUSTER_BRIDGES = [
+  { source: "Antigravity Skill", target: "Smart AI Router", type: "uses" },
+  { source: "Smart AI Router", target: "agentmemory module", type: "modifies" },
+  { source: "Smart AI Router", target: "Samsung Galaxy Z Fold 3", type: "depends_on" },
+  { source: "MacBook Pro", target: "agentmemory module", type: "uses" },
+  { source: "Antigravity Skill", target: "Flutter", type: "modifies" },
+  { source: "Samsung Galaxy Z Fold 3", target: "MacBook Pro", type: "depends_on" },
+  { source: "agentmemory module", target: "Smart AI Router", type: "depends_on" },
+  { source: "CoreAudio HAL", target: "MacBook Pro", type: "depends_on" },
+  { source: "ShopEasy Architecture", target: "Flutter", type: "depends_on" }
+];
+
 async function queryGraph(secret, limit = 500) {
   const res = await fetch(`${BASE_URL}/agentmemory/graph/query`, {
     method: "POST",
@@ -61,27 +139,81 @@ async function queryGraph(secret, limit = 500) {
   const edges = data.edges || [];
 
   const linkedIds = new Set();
+  const degrees = {};
   for (const e of edges) {
     linkedIds.add(e.sourceNodeId);
     linkedIds.add(e.targetNodeId);
+    degrees[e.sourceNodeId] = (degrees[e.sourceNodeId] || 0) + 1;
+    degrees[e.targetNodeId] = (degrees[e.targetNodeId] || 0) + 1;
   }
   const unlinked = nodes
-    .map((n, idx) => ({ ...n, idx }))
+    .map((n, idx) => ({ ...n, idx, degree: degrees[n.id] || 0 }))
     .filter((n) => !linkedIds.has(n.id));
 
   return {
     data,
-    nodes,
+    nodes: nodes.map((n, idx) => ({ ...n, idx, degree: degrees[n.id] || 0 })),
     edges,
-    unlinked
+    unlinked,
+    degrees
   };
+}
+
+function classifyNodeDomain(node) {
+  const name = (node.name || "").toLowerCase();
+  const type = node.type || "concept";
+
+  let bestDomain = THEMATIC_DOMAINS[5]; // default: dev_tooling
+  let maxScore = 0;
+
+  for (const d of THEMATIC_DOMAINS) {
+    let score = 0;
+    for (const kw of d.keywords) {
+      if (name.includes(kw)) score += 2;
+    }
+    if (score > maxScore) {
+      maxScore = score;
+      bestDomain = d;
+    }
+  }
+
+  // Type-based fine tuning
+  if (type === "file" && name.includes("dart")) bestDomain = THEMATIC_DOMAINS[3]; // Flutter
+  if (type === "file" && (name.includes("smart-router") || name.includes("router"))) bestDomain = THEMATIC_DOMAINS[0]; // AI
+  if (type === "file" && name.includes("audio")) bestDomain = THEMATIC_DOMAINS[4]; // macOS audio
+
+  return bestDomain;
+}
+
+function determineSemanticRelation(node, anchor) {
+  const type = node.type || "concept";
+  const name = (node.name || "").toLowerCase();
+
+  if (type === "file") {
+    if (name.endsWith(".mjs") || name.endsWith(".js") || name.endsWith(".dart") || name.endsWith(".sh")) {
+      return "modifies";
+    }
+    if (name.endsWith(".json") || name.endsWith(".yaml") || name.endsWith(".plist") || name.endsWith(".env")) {
+      return "depends_on";
+    }
+    return "modifies";
+  }
+
+  if (type === "library") return "depends_on";
+  if (type === "command") return "uses";
+  if (type === "error" || name.includes("fix") || name.includes("error") || name.includes("repair")) return "fixes";
+  if (type === "decision") return "optimizes_for";
+
+  if (name.includes("api") || name.includes("service") || name.includes("tool")) return "uses";
+  if (name.includes("model") || name.includes("engine") || name.includes("hal")) return "depends_on";
+
+  return "related_to";
 }
 
 function pickSemanticAnchor(unlinkedNode, frontAnchors, fallbackIdx) {
   const name = (unlinkedNode.name || "").toLowerCase();
   const type = unlinkedNode.type || "concept";
 
-  // Match by domain keywords against frontAnchors[0..N]
   for (const anchor of frontAnchors) {
     if (anchor.name === unlinkedNode.name && anchor.type === unlinkedNode.type) continue;
     const aName = (anchor.name || "").toLowerCase();
@@ -153,13 +285,163 @@ async function rebuildSnapshot(secret) {
   }).catch(() => {});
 }
 
+async function runBeautify(secret) {
+  console.log("🎨 [Beautify] Analyzing graph topology and thematic clusters...");
+  const { nodes, edges, unlinked } = await queryGraph(secret);
+  const nodeByName = new Map(nodes.map((n) => [n.name, n]));
+
+  // Ensure all domain anchors are registered as entities
+  const entitiesMap = new Map();
+  for (const d of THEMATIC_DOMAINS) {
+    entitiesMap.set(`${d.anchor.type}:${d.anchor.name}`, d.anchor);
+    entitiesMap.set(`${d.subAnchor.type}:${d.subAnchor.name}`, d.subAnchor);
+  }
+
+  // 1. Establish Inter-Cluster Central Backbone Bridges
+  const rels = [];
+  const existingPairSet = new Set(
+    edges.map((e) => {
+      const s = nodeByName.get(e.sourceNodeId);
+      const t = nodeByName.get(e.targetNodeId);
+      return s && t ? `${s.name}|${t.name}` : "";
+    })
+  );
+
+  for (const bridge of INTER_CLUSTER_BRIDGES) {
+    const pair1 = `${bridge.source}|${bridge.target}`;
+    const pair2 = `${bridge.target}|${bridge.source}`;
+    if (!existingPairSet.has(pair1) && !existingPairSet.has(pair2)) {
+      rels.push({
+        source: bridge.source,
+        target: bridge.target,
+        type: bridge.type
+      });
+      existingPairSet.add(pair1);
+    }
+  }
+
+  // 2. Classify and balance nodes into the 6 domain clusters
+  const clusterCounts = {};
+  const anchorCap = 25; // max edges per main anchor to avoid crowded hairballs
+  const anchorUsage = {};
+
+  for (const d of THEMATIC_DOMAINS) {
+    clusterCounts[d.id] = 0;
+    anchorUsage[d.anchor.name] = 0;
+    anchorUsage[d.subAnchor.name] = 0;
+  }
+
+  // Connect any unlinked or weakly connected leaf nodes (degree <= 1) to balanced thematic anchors
+  const candidates = nodes.filter((n) => n.degree <= 1 || unlinked.some((u) => u.id === n.id));
+  console.log(`🎨 [Beautify] Balancing ${candidates.length} candidate leaf & unlinked nodes across 6 clusters...`);
+
+  for (const node of candidates) {
+    const domain = classifyNodeDomain(node);
+    clusterCounts[domain.id] = (clusterCounts[domain.id] || 0) + 1;
+
+    // Pick main anchor if under cap, otherwise spill over to subAnchor
+    const targetAnchor =
+      (anchorUsage[domain.anchor.name] || 0) < anchorCap ? domain.anchor : domain.subAnchor;
+    anchorUsage[targetAnchor.name] = (anchorUsage[targetAnchor.name] || 0) + 1;
+
+    if (node.name !== targetAnchor.name) {
+      const pair1 = `${node.name}|${targetAnchor.name}`;
+      const pair2 = `${targetAnchor.name}|${node.name}`;
+      if (!existingPairSet.has(pair1) && !existingPairSet.has(pair2)) {
+        entitiesMap.set(`${node.type}:${node.name}`, node);
+        entitiesMap.set(`${targetAnchor.type}:${targetAnchor.name}`, targetAnchor);
+        const relType = determineSemanticRelation(node, targetAnchor);
+        rels.push({
+          source: node.name,
+          target: targetAnchor.name,
+          type: relType
+        });
+        existingPairSet.add(pair1);
+      }
+    }
+  }
+
+  console.log(`🎨 [Beautify] Injecting ${rels.length} balanced semantic relationships via DIRECT_GRAPH_XML...`);
+  const extractRes = await applyDirectXmlLinks(secret, Array.from(entitiesMap.values()), rels);
+  console.log(`🎨 [Beautify] Graph extraction completed: +${extractRes.edgesAdded} edges.`);
+
+  console.log("🎨 [Beautify] Rebuilding snapshot cache...");
+  await rebuildSnapshot(secret);
+
+  // 3. Final zero-unlinked sweep if any newly added anchors or nodes remained isolated
+  let final = await queryGraph(secret);
+  if (final.unlinked.length > 0) {
+    console.log(`🎨 [Beautify] Sweeping ${final.unlinked.length} remaining isolated nodes...`);
+    const sweepEntities = new Map();
+    const sweepRels = [];
+    const frontAnchor = final.nodes[0] || { name: "call_mcp_tool", type: "concept" };
+    sweepEntities.set(`${frontAnchor.type}:${frontAnchor.name}`, frontAnchor);
+
+    for (const u of final.unlinked) {
+      if (u.name === frontAnchor.name) continue;
+      sweepEntities.set(`${u.type}:${u.name}`, u);
+      sweepRels.push({
+        source: u.name,
+        target: frontAnchor.name,
+        type: "related_to"
+      });
+    }
+
+    if (sweepRels.length > 0) {
+      await applyDirectXmlLinks(secret, Array.from(sweepEntities.values()), sweepRels);
+      await rebuildSnapshot(secret);
+      final = await queryGraph(secret);
+    }
+  }
+  const edgeTypeCounts = {};
+  for (const e of final.edges) {
+    edgeTypeCounts[e.type] = (edgeTypeCounts[e.type] || 0) + 1;
+  }
+
+  const degValues = Object.values(final.degrees);
+  const maxDeg = degValues.length ? Math.max(...degValues) : 0;
+  const avgDeg = degValues.length
+    ? (degValues.reduce((a, b) => a + b, 0) / degValues.length).toFixed(1)
+    : 0;
+
+  console.log(
+    JSON.stringify(
+      {
+        status: "beautified",
+        unlinkedCount: final.unlinked.length,
+        sparseWarningActive: final.unlinked.length > Math.floor(final.nodes.length * 0.1),
+        viewNodes: final.nodes.length,
+        viewEdges: final.edges.length,
+        maxDegree: maxDeg,
+        avgDegree: avgDeg,
+        clusters: THEMATIC_DOMAINS.map((d) => ({
+          domain: d.label,
+          mainAnchor: d.anchor.name,
+          assignedNodes: clusterCounts[d.id] || 0
+        })),
+        edgeTypeDiversity: edgeTypeCounts
+      },
+      null,
+      2
+    )
+  );
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const mode = args[0] || "--status";
   const secret = getSecret();
 
   if (mode === "--status") {
-    const { data, nodes, edges, unlinked } = await queryGraph(secret);
+    const { data, nodes, edges, unlinked, degrees } = await queryGraph(secret);
+    const edgeTypes = {};
+    for (const e of edges) edgeTypes[e.type] = (edgeTypes[e.type] || 0) + 1;
+    const degValues = Object.values(degrees);
+    const maxDeg = degValues.length ? Math.max(...degValues) : 0;
+    const avgDeg = degValues.length
+      ? (degValues.reduce((a, b) => a + b, 0) / degValues.length).toFixed(1)
+      : 0;
+
     console.log(
       JSON.stringify(
         {
@@ -169,7 +451,10 @@ async function main() {
           viewEdges: edges.length,
           unlinkedCount: unlinked.length,
           sparseWarningActive: unlinked.length > Math.floor(nodes.length * 0.1),
-          frontAnchors: nodes.slice(0, 10).map((n, idx) => ({ idx, name: n.name, type: n.type })),
+          maxDegree: maxDeg,
+          avgDegree: avgDeg,
+          edgeTypes,
+          frontAnchors: nodes.slice(0, 10).map((n) => ({ idx: n.idx, name: n.name, type: n.type, degree: n.degree })),
           sampleUnlinked: unlinked.slice(0, 15).map((n) => ({ idx: n.idx, name: n.name, type: n.type }))
         },
         null,
@@ -179,12 +464,17 @@ async function main() {
     return;
   }
 
+  if (mode === "--beautify") {
+    await runBeautify(secret);
+    return;
+  }
+
   if (mode === "--dump") {
     const { nodes, unlinked } = await queryGraph(secret);
     console.log(
       JSON.stringify(
         {
-          frontAnchors: nodes.slice(0, 12).map((n, idx) => ({ idx, name: n.name, type: n.type })),
+          frontAnchors: nodes.slice(0, 12).map((n) => ({ idx: n.idx, name: n.name, type: n.type, degree: n.degree })),
           unlinkedCount: unlinked.length,
           unlinked: unlinked.map((n) => ({ idx: n.idx, name: n.name, type: n.type }))
         },
@@ -234,7 +524,6 @@ async function main() {
   }
 
   if (mode === "--auto") {
-    // Progressive front-anchor convergence (uses top 10 -> 6 -> 4 front anchors so edges stay at root.head of pageNodes[0..9])
     const anchorWindows = [10, 6, 4];
     for (let pass = 0; pass < anchorWindows.length; pass++) {
       const { nodes, edges, unlinked } = await queryGraph(secret);
@@ -283,7 +572,7 @@ async function main() {
     return;
   }
 
-  throw new Error(`Unknown flag: ${mode}. Use --status, --auto, --dump, or --apply.`);
+  throw new Error(`Unknown flag: ${mode}. Use --status, --auto, --beautify, --dump, or --apply.`);
 }
 
 main().catch((err) => {

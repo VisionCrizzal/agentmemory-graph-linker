@@ -59,6 +59,9 @@ bash install.sh
 # Kiểm tra trạng thái đồ thị & số lượng node unlinked
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --status
 
+# Làm đẹp & phân bổ đều đồ thị thành 6 cụm chòm sao chủ đề (Khuyên dùng)
+node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --beautify
+
 # Tự động nối toàn bộ node unlinked & rebuild snapshot (0 token)
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --auto
 
