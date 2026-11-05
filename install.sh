@@ -19,6 +19,20 @@ echo "==> Installing Smart AI Router (secret-free, reads from ~/.agentmemory/.en
 cp "$REPO_DIR/router/smart-router.mjs" "$AGENTMEMORY_DIR/smart-router.mjs"
 echo "    ✓ Copied smart-router.mjs to $AGENTMEMORY_DIR/smart-router.mjs"
 
+if [ -f "$AGENTMEMORY_DIR/.env" ]; then
+  if ! grep -q "^AGENTMEMORY_LLM_PROVIDER=" "$AGENTMEMORY_DIR/.env" && grep -q "^OPENAI_API_KEY=" "$AGENTMEMORY_DIR/.env"; then
+    echo "==> Ensuring AGENTMEMORY_LLM_PROVIDER=openai in $AGENTMEMORY_DIR/.env (v0.9.32+ compatibility)..."
+    node -e '
+      const fs = require("fs");
+      const p = process.argv[1];
+      let c = fs.readFileSync(p, "utf8");
+      c = c.replace(/^OPENAI_API_KEY=/m, "AGENTMEMORY_LLM_PROVIDER=openai\nOPENAI_API_KEY=");
+      fs.writeFileSync(p, c, "utf8");
+    ' "$AGENTMEMORY_DIR/.env"
+    echo "    ✓ Added AGENTMEMORY_LLM_PROVIDER=openai"
+  fi
+fi
+
 AGENTMEMORY_DIST="/usr/local/lib/node_modules/@agentmemory/agentmemory/dist/index.mjs"
 if [ -f "$AGENTMEMORY_DIST" ]; then
   if grep -q "maxReads: 2048" "$AGENTMEMORY_DIST"; then

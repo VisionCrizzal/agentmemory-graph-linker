@@ -638,9 +638,36 @@ async function runDelete(targets) {
 }
 
 /**
- * One-Shot Maintenance: Spool Drain + Retrieval Index Check + Snapshot Rebuild
+ * One-Shot Maintenance: Env & maxReads Self-Patch + Spool Drain + Retrieval Index Check + Snapshot Rebuild
  */
 async function runHeal(secret) {
+  const selfPatches = { envLlmProvider: "already_set", maxReads4096: "already_patched" };
+
+  // 1. Ensure AGENTMEMORY_LLM_PROVIDER=openai in ~/.agentmemory/.env (v0.9.32+ breaking requirement)
+  const envPath = path.join(HOME, ".agentmemory", ".env");
+  if (fs.existsSync(envPath)) {
+    let envContent = fs.readFileSync(envPath, "utf8");
+    if (!/^AGENTMEMORY_LLM_PROVIDER=/m.test(envContent) && /^OPENAI_API_KEY=/m.test(envContent)) {
+      envContent = envContent.replace(/^OPENAI_API_KEY=/m, "AGENTMEMORY_LLM_PROVIDER=openai\nOPENAI_API_KEY=");
+      fs.writeFileSync(envPath, envContent, "utf8");
+      selfPatches.envLlmProvider = "patched_openai";
+    }
+  }
+
+  // 2. Ensure maxReads: 4096 & maxBytes: 8MB in dist/index.mjs (survives npm upgrades)
+  const distPath = "/usr/local/lib/node_modules/@agentmemory/agentmemory/dist/index.mjs";
+  if (fs.existsSync(distPath)) {
+    let distContent = fs.readFileSync(distPath, "utf8");
+    if (distContent.includes("maxReads: 2048")) {
+      distContent = distContent.replace(
+        /createGraphIndexReader\(state,\s*\{\s*maxReads:\s*2048,\s*maxBytes:\s*4\s*\*\s*1024\s*\*\s*1024\s*\}\)/g,
+        "createGraphIndexReader(state, {\n\t\t\tmaxReads: 4096,\n\t\t\tmaxBytes: 8 * 1024 * 1024\n\t\t})"
+      );
+      fs.writeFileSync(distPath, distContent, "utf8");
+      selfPatches.maxReads4096 = "re_patched_after_upgrade";
+    }
+  }
+
   const drainRes = await fetch(`${BASE_URL}/agentmemory/capture/drain`, {
     method: "POST",
     headers: {
@@ -681,6 +708,7 @@ async function runHeal(secret) {
     JSON.stringify(
       {
         status: "healed",
+        selfPatches,
         spoolDrain: drainData.results?.[0] || drainData,
         graphIndex: {
           state: indexData.state || indexData.control?.status,
