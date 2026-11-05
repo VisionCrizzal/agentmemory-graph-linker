@@ -4,7 +4,7 @@ description: Links unlinked nodes (NO RELATIONS YET), permanently deletes unwant
 user-invocable: true
 ---
 
-# AgentMemory Knowledge Graph Linker, Cleaner & Healer (v2.0)
+# AgentMemory Knowledge Graph Linker, Cleaner & Healer (v2.1)
 
 Links isolated nodes (`NO RELATIONS YET`), permanently deletes unwanted nodes across all 4 storage layers, drains offline capture spools, and balances thematic clusters in the AgentMemory Knowledge Graph (`http://localhost:3113/#graph`) without burning frontier LLM tokens.
 
@@ -63,5 +63,5 @@ AgentMemory's `queryGraphIndex` enforces a bounded `maxReads: 4096` KV read cap:
 
 ## See also
 
-- [REFERENCE.md](REFERENCE.md) for the `maxReads: 4096` math, 4-layer KV deletion architecture, same-name XML batching, and v2.0 changelog.
+- [REFERENCE.md](REFERENCE.md) for the `maxReads: 4096` math, 4-layer KV deletion architecture, same-name XML batching, and v2.1 changelog.
 - [scripts/graph-linker.mjs](scripts/graph-linker.mjs) for the executable CLI implementation.

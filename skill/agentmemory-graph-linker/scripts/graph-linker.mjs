@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * AgentMemory Knowledge Graph Linker, Beautifier, Cleaner & Healer (v2.0)
+ * AgentMemory Knowledge Graph Linker, Beautifier, Cleaner & Healer (v2.1)
  * Zero-Token / Lightweight-Model Graph Toolkit for Antigravity
  *
  * Usage:

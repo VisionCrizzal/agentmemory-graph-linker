@@ -1,4 +1,4 @@
-# AgentMemory Knowledge Graph Linker Reference (v2.0)
+# AgentMemory Knowledge Graph Linker Reference (v2.1)
 
 ## 1. The `maxReads: 4096` KV Budget Architecture
 
@@ -75,6 +75,15 @@ When hooks execute while the AgentMemory server is restarting, observations are 
 ---
 
 ## 5. Changelog
+
+### v2.1 (2026-11-05)
+- **Self-Healing `maxReads: 4096` & `AGENTMEMORY_LLM_PROVIDER` in `--heal` and `install.sh`**:
+  - Automatically checks `/usr/local/lib/node_modules/@agentmemory/agentmemory/dist/index.mjs` and re-patches `maxReads: 2048 -> 4096` (`maxBytes: 4MB -> 8MB`) whenever an `npm install -g @agentmemory/agentmemory` upgrade overwrites `dist/index.mjs`.
+  - Automatically checks `~/.agentmemory/.env` and inserts `AGENTMEMORY_LLM_PROVIDER=openai` when `OPENAI_API_KEY` is present (preventing `@agentmemory/agentmemory` v0.9.32+ from falling back to `noop` mode and disabling `/agentmemory/graph/extract`).
+- **Auto-Resume Paused Graph Index in `--heal`**:
+  - Automatically triggers `POST /agentmemory/graph/index/resume` (`{ allowLegacyScan: true }`) if the retrieval index enters `paused` state after a daemon restart.
+- **Synced Official AgentMemory Skills**:
+  - Updated all 6 bundled `agentmemory-*` skills (`agents`, `architecture`, `config`, `hooks`, `mcp-tools`, `rest-api`) in `~/.agents/skills/` to match `@agentmemory/agentmemory@0.9.32`.
 
 ### v2.0 (2026-11-05)
 - **Added `--delete "<name_or_id>"`**: 4-layer permanent deletion of nodes and incident edges across `mem:graph:retrieval-data`, `mem:graph:retrieval-control`, `mem:graph:nodes`/`edges`/`node-degree`, `mem:graph:name-index`/`edge-key`, and `mem:graph:snapshot`.

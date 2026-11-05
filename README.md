@@ -1,4 +1,4 @@
-# AgentMemory Knowledge Graph Linker, Cleaner & Smart AI Router (v2.0)
+# AgentMemory Knowledge Graph Linker, Cleaner & Smart AI Router (v2.1)
 
 🌐 **Language / Ngôn ngữ:** **🇬🇧 English** | [🇻🇳 Tiếng Việt](./README-VN.md)
 
@@ -6,20 +6,22 @@ A lightweight **Antigravity Skill (`agentmemory-graph-linker`)** and **11-Tier S
 
 ---
 
-## ✨ Key Features (v2.0)
+## ✨ Key Features (v2.1)
 
 1. **Zero-Token Direct Graph Linking (`DIRECT_GRAPH_XML`)**:
    - Connects all `UNLINKED` nodes in `< 2 seconds` with **zero cloud LLM calls** (saving expensive frontier model quotas).
    - Preserves **100% of node types verbatim** (`concept`, `file` with or without file extensions, `command`, `library`, `person`, `error`, `decision`, `function`, `pattern`, `entity`), avoiding the type-remapping limitations of `import-graphify`.
-   - **Same-Name Entity Collision Batching (v2.0)**: Automatically splits XML batches when two entities share the same `name` with different `type` (e.g. `Zalo` as `entity` vs `library`) so `parseGraphXml` never overwrites node types.
+   - **Same-Name Entity Collision Batching**: Automatically splits XML batches when two entities share the same `name` with different `type` (e.g. `Zalo` as `entity` vs `library`) so `parseGraphXml` never overwrites node types.
 2. **4-Layer Permanent Node & Edge Deletion (`--delete`)**:
    - Connects directly to the `iii` engine WebSocket (`ws://127.0.0.1:49134`, namespace `agentmemory-3111`) to permanently remove unwanted nodes and their incident edges across all 4 storage layers:
      1. `mem:graph:retrieval-data` (unlinks doubly-linked postings and clears `row: null`)
      2. `mem:graph:retrieval-control` (decrements node/edge counters and bumps `revision`)
      3. `mem:graph:nodes`, `mem:graph:edges`, `mem:graph:node-degree`
      4. `mem:graph:name-index`, `mem:graph:edge-key`, and rebuilds `mem:graph:snapshot`
-3. **One-Shot Health Recovery & Spool Drain (`--heal` / `--drain`)**:
-   - Flushes pending observations in the offline capture spool (`/agentmemory/capture/drain`), verifies retrieval index status (`/agentmemory/graph/index`), rebuilds the graph snapshot, and checks `unlinkedCount`.
+3. **One-Shot Self-Healing & Spool Drain (`--heal` / `--drain`)**:
+   - **Self-Patches `maxReads: 4096` (`8MB`)**: Automatically detects if an `npm install -g @agentmemory/agentmemory` upgrade reset `dist/index.mjs` back to `maxReads: 2048` and re-patches it to `4096`.
+   - **Self-Patches `AGENTMEMORY_LLM_PROVIDER=openai`**: Ensures `~/.agentmemory/.env` complies with `@agentmemory/agentmemory` v0.9.32+ breaking requirements so `/agentmemory/graph/extract` stays enabled.
+   - **Auto-Resumes Paused Graph Index**: Automatically calls `POST /agentmemory/graph/index/resume` if the retrieval index entered `paused` state during a daemon restart, drains the offline capture spool (`/agentmemory/capture/drain`), and rebuilds the snapshot.
 4. **Front-of-Queue LIFO Anchor Algorithm & Auto-Anchor Visibility Protection**:
    - Engineered around AgentMemory's doubly-linked LIFO `"nodes"` and `"adjacency"` posting lists so newly created edges attach to `pageNodes[0..24]` and are guaranteed to be read within the `maxReads: 4096` KV budget.
    - In `--apply`, deep chains (`idx >= 25`) automatically receive a visibility bridge to `pageNodes[0..24]`.
@@ -101,3 +103,17 @@ FALLBACK_PROVIDERS=gemini
 SUMMARIZE_CHUNK_SIZE=5000
 SUMMARIZE_CHUNK_CONCURRENCY=1
 ```
+
+---
+
+## 📋 Changelog
+
+- **v2.1 (2026-11-05)**:
+  - Added self-healing in `--heal` and `install.sh` to automatically re-patch `maxReads: 4096` (`maxBytes: 8MB`) in `dist/index.mjs` after npm upgrades and ensure `AGENTMEMORY_LLM_PROVIDER=openai` in `~/.agentmemory/.env` for `@agentmemory/agentmemory` v0.9.32+ compatibility.
+  - Added automatic `POST /agentmemory/graph/index/resume` recovery in `--heal` when the retrieval index is `paused` after a daemon restart.
+- **v2.0 (2026-11-05)**:
+  - Added `--delete "<name_or_id>"` for 4-layer permanent deletion of nodes and incident edges via `iii` WebSocket (`ws://127.0.0.1:49134`).
+  - Added `--heal` / `--drain` for one-shot capture spool draining and index verification.
+  - Added Auto-Anchor Visibility Protection (`pageNodes[0..24]`) and Same-Name Entity Collision Batching in `--apply`.
+  - Added Multi-Pass Boundary Sweep in `--beautify`.
+
