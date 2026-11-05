@@ -1,32 +1,31 @@
-# AgentMemory Knowledge Graph Linker, Cleaner & Smart AI Router (v2.1)
+# AgentMemory Knowledge Graph Linker, Cleaner & Smart AI Router (v2.2)
 
 🌐 **Language / Ngôn ngữ:** [🇬🇧 English](./README.md) | **🇻🇳 Tiếng Việt**
 
-Bộ công cụ và **Antigravity Skill (`agentmemory-graph-linker`)** giúp tự động nối các node rời rạc (`UNLINKED / NO RELATIONS YET`), xóa vĩnh viễn các node rác trên cả 4 tầng lưu trữ KV, xả hàng đợi offline spool, và phân bổ đồ thị tri thức của `@agentmemory/agentmemory` (`http://localhost:3113/#graph`) chỉ với **1 lệnh duy nhất, tốn 0 token LLM ngoài**.
+Bộ công cụ và **Antigravity Skill (`agentmemory-graph-linker`)** kèm **Smart AI Router 11 tầng (v2.2)** giúp tự động nối các node rời rạc (`UNLINKED / NO RELATIONS YET`), xóa vĩnh viễn các node rác trên cả 5 tầng lưu trữ KV (bao gồm `mem:facets`), xả hàng đợi offline spool, đọc & tự sửa lỗi từ `mcp-crash.log` / daemon log bằng **con trỏ byte-offset tiết kiệm 100% token cho các dòng đã đọc**, và phân bổ đồ thị tri thức của `@agentmemory/agentmemory` (`http://localhost:3113/#graph`).
 
 ---
 
-## ✨ Tính năng nổi bật (v2.1)
+## ✨ Tính năng nổi bật (v2.2)
 
-1. **Zero-Token Direct Graph Linking (`DIRECT_GRAPH_XML`)**:
-   - Nối toàn bộ các node `UNLINKED` vào đồ thị tri thức trong `< 2 giây` mà **không tốn quota của các mô hình lớn**.
-   - Hỗ trợ chính xác 100% mọi loại node (`concept`, `file` có hoặc không có phần mở rộng, `command`, `library`, `person`, `error`, `decision`, `function`, `pattern`, `entity`).
-   - **Tự động tách Batch chống đụng độ trùng tên**: Tự động tách batch XML khi có 2 thực thể trùng tên nhưng khác kiểu (ví dụ `Zalo` kiểu `entity` và `Zalo` kiểu `library`).
-2. **Xóa vĩnh viễn Node & Cạnh trên 4 tầng KV (`--delete`)**:
-   - Kết nối trực tiếp vào `iii` engine WebSocket (`ws://127.0.0.1:49134`, namespace `agentmemory-3111`) để xóa sạch hoàn toàn node và các cạnh liên đới trên cả 4 tầng:
+1. **Đọc Log Tăng Trưởng & Tự Chữa Lành Không Tốn Token (`--logs` & `--heal`, #1662 / #1674)**:
+   - Kết nối trực tiếp vào `~/.agentmemory/mcp-crash.log` (cùng bản xoay vòng `mcp-crash.log.1` và `$TMPDIR/agentmemory-mcp-crash.log`), `~/Library/Logs/agentmemory.error.log` và `~/Library/Logs/agentmemory.log`.
+   - Lưu vị trí con trỏ `{ ino, offset, mtimeMs }` tại `~/.agentmemory/.log-heal-cursor.json`: **file nào hoặc đoạn log nào đã đọc và sửa xong sẽ được bỏ qua hoàn toàn (`unreadBytesRead: 0`, `skipped_already_read`)**, tuyệt đối không đọc lại gây tốn token.
+2. **Smart AI Router v2.2 Chống Lưu Câu Trả Lời Cụt (#1495) & Cắt Chuỗi An Toàn Surrogate (#1598)**:
+   - **Chống lưu câu trả lời cụt (#1495)**: Tự động phát hiện khi model chạm trần `max_tokens` (`finish_reason === "length"`) hoặc trả về thẻ XML `<summary>`, `<observation>`, `<entities>` bị cụt ngang chưa đóng thẻ $\rightarrow$ tự động chuyển tiếp (failover) sang tầng model dự phòng tiếp theo thay vì lưu dữ liệu dở dang vào bộ nhớ.
+   - **Cắt chuỗi UTF-16 Surrogate-Safe (#1598)**: Hàm `sliceHeadSurrogateSafe()` và `sliceTailSurrogateSafe()` bảo vệ toàn vẹn ký tự Unicode đặc biệt, emoji và CJK/Tiếng Việt khi rút gọn prompt (`12,000` ký tự).
+3. **Xóa Vĩnh Viễn Node, Cạnh & Facet Trên 5 Tầng KV (`--delete`, #1642)**:
+   - Kết nối trực tiếp vào `iii` engine WebSocket (`ws://127.0.0.1:49134`, namespace `agentmemory-3111`) để xóa sạch hoàn toàn node, cạnh liên đới và facet mồ côi trên cả 5 tầng:
      1. `mem:graph:retrieval-data` (tháo mắt xích danh sách liên kết kép và đặt `row: null`)
      2. `mem:graph:retrieval-control` (giảm bộ đếm node/edge và tăng `revision`)
-     3. `mem:graph:nodes`, `mem:graph:edges`, `mem:graph:node-degree`
+     3. `mem:graph:nodes`, `mem:graph:edges`, `mem:graph:node-degree`, `mem:graph:membership`, `mem:graph:edge-history`
      4. `mem:graph:name-index`, `mem:graph:edge-key` và tự động rebuild `mem:graph:snapshot`
-3. **Tự chữa lành (`Self-Healing`) & Xả hàng đợi Spool 1 chạm (`--heal` / `--drain`)**:
-   - **Tự động vá lại `maxReads: 4096` (`8MB`)**: Phát hiện khi `dist/index.mjs` bị ghi đè về `maxReads: 2048` sau khi nâng cấp npm và tự động patch lại `4096`.
-   - **Tự động bảo toàn `AGENTMEMORY_LLM_PROVIDER=openai`**: Đảm bảo `~/.agentmemory/.env` luôn tương thích với Breaking Change của `@agentmemory/agentmemory` v0.9.32+.
-   - **Tự động Resume Graph Index**: Tự động gọi `POST /agentmemory/graph/index/resume` nếu chỉ mục đồ thị bị `paused` khi khởi động lại daemon, xả hàng đợi offline capture spool (`/agentmemory/capture/drain`) và làm mới snapshot.
-4. **Thuật toán Neo Đầu Hàng Đợi (`Front-of-Queue LIFO Anchors`) & Chống đứt chuỗi sâu**:
-   - Tối ưu theo cấu trúc danh sách liên kết LIFO của AgentMemory, đảm bảo các cạnh mới luôn gắn vào `pageNodes[0..24]` trong ngân sách `maxReads: 4096`.
-   - Trong chế độ `--apply`, các chuỗi liên kết sâu (`idx >= 25`) tự động được bắc cầu phụ về `pageNodes[0..24]` để hiển thị 100% ngay trong 1 lượt chạy.
-5. **Smart AI Router 11 Tầng (`router/smart-router.mjs`)**:
-   - Tự động điều phối qua chuỗi Groq (`gpt-oss-20b`, `qwen3.8-27b`, `gpt-oss-120b`) $\rightarrow$ Google Gemma 4 (`26B MoE`, `31B IT`) $\rightarrow$ Gemini (`3.8 Flash`, `3.5 Flash`, `Flash Lite`) $\rightarrow$ Local AI Node $\rightarrow$ **Local Extractive Fallback (Zero-Fail Safety Net)**.
+     5. `mem:facets` (dọn dẹp toàn bộ Facet mồ côi trỏ tới node/cạnh vừa xóa theo bản vá #1642)
+4. **Bảo Trì 1 Chạm, Quét Session Bỏ Rơi & Thu Hồi Index Mồ Côi (`--heal` / `--drain`)**:
+   - **Tự động vá `maxReads: 4096` (`8MB`) & `AGENTMEMORY_LLM_PROVIDER=openai`**: Tự động khôi phục `maxReads: 4096` sau khi nâng cấp npm, giữ `AGENTMEMORY_LLM_PROVIDER=openai` và dọn bỏ biến cũ `OPENAI_API_KEY_FOR_LLM` (#1664).
+   - **Quét Session bị bỏ rơi (#1645), Kiểm tra Index mồ côi (#1256) & Thống kê đồ thị giới hạn (#1260)**: Tự động kích hoạt `mem::session-sweep`, kiểm tra trạng thái thu hồi thế hệ index mồ côi (`mem:idx:bm25` `"legacy:sweep"`), truy vấn `mem::graph-stats` giới hạn kích thước gói tin, xả hàng đợi capture spool và làm mới snapshot.
+5. **Zero-Token Direct Graph Linking (`DIRECT_GRAPH_XML`) & Neo Đầu Hàng Đợi LIFO**:
+   - Nối toàn bộ các node `UNLINKED` trong `< 2 giây` tốn 0 token ngoài, bảo toàn 100% kiểu node và tự động tách batch XML khi có thực thể trùng tên khác kiểu.
 
 ---
 
@@ -39,12 +38,12 @@ agentmemory-graph-linker/
 ├── install.sh                                     # Script cài đặt tự động 1 lệnh & vá maxReads: 4096
 ├── skill/
 │   └── agentmemory-graph-linker/
-│       ├── SKILL.md                               # Skill cho Antigravity
-│       ├── REFERENCE.md                           # Giải thích toán học maxReads 4096, xóa 4 tầng KV & changelog
+│       ├── SKILL.md                               # Skill cho Antigravity (v2.2)
+│       ├── REFERENCE.md                           # Giải thích toán học maxReads 4096, xóa 5 tầng KV, con trỏ log & changelog
 │       └── scripts/
-│           └── graph-linker.mjs                   # CLI thực thi (--status, --beautify, --delete, --heal, --dump, --apply, --auto)
+│           └── graph-linker.mjs                   # CLI thực thi (--status, --beautify, --delete, --heal, --logs, --dump, --apply, --auto)
 └── router/
-    ├── smart-router.mjs                           # Smart AI Router (đọc API key từ ~/.agentmemory/.env)
+    ├── smart-router.mjs                           # Smart AI Router v2.2 (đọc API key từ ~/.agentmemory/.env)
     └── com.agentmemory.smartrouter.plist.example  # Mẫu LaunchAgent tự chạy ngầm trên macOS
 ```
 
@@ -71,11 +70,14 @@ node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs -
 # Làm đẹp & phân bổ đều đồ thị thành 6 cụm chòm sao chủ đề + quét biên tự động (Khuyên dùng)
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --beautify
 
-# Xóa vĩnh viễn các node rác & cạnh liên đới trên cả 4 tầng KV
+# Xóa vĩnh viễn các node rác, cạnh liên đới & facet trên cả 5 tầng KV
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --delete "Tên Node 1" "gn_id_2"
 
-# Bảo trì 1 chạm: xả hàng đợi capture spool + kiểm tra index + rebuild snapshot
+# Bảo trì 1 chạm: đọc/sửa log mới + xả spool + quét session bỏ rơi + kiểm tra index + rebuild snapshot
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --heal
+
+# Chỉ đọc phần byte mới phát sinh trong mcp-crash.log & daemon log (0 byte nếu đã đọc xong)
+node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --logs
 
 # Xuất danh sách front anchors (0..24) & node unlinked dạng JSON để phân loại ngữ nghĩa
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --dump
@@ -108,12 +110,13 @@ SUMMARIZE_CHUNK_CONCURRENCY=1
 
 ## 📋 Changelog (Lịch sử phiên bản)
 
+- **v2.2 (2026-11-05)**:
+  - **Đọc Log Tăng Trưởng Không Tốn Token (`--logs` & tích hợp trong `--heal`, #1662 / #1674)**: Nối trực tiếp vào `~/.agentmemory/mcp-crash.log` (cùng `.1` / `$TMPDIR`) và daemon logs (`agentmemory.error.log`, `agentmemory.log`) kèm bộ nhớ con trỏ `~/.agentmemory/.log-heal-cursor.json` (`ino`, `offset`) giúp bỏ qua 100% các file/dòng log đã đọc và đã sửa xong (`0 bytes` đọc lại).
+  - **Smart AI Router v2.2 (`router/smart-router.mjs`)**: Bổ sung **Chống lưu câu trả lời cụt (#1495)** (`finish_reason === "length"` và kiểm tra đóng thẻ XML `<summary>`/`<observation>`/`<entities>`) và **Cắt chuỗi an toàn Surrogate (#1598)** (`sliceHeadSurrogateSafe`, `sliceTailSurrogateSafe`).
+  - **Xóa 5 tầng KV kèm dọn dẹp Facet & Membership (`--delete`, #1642)**: Tự động xóa sạch các `mem:facets`, `mem:graph:membership` và `mem:graph:edge-history` mồ côi khi xóa node.
+  - **Tích hợp dọn dẹp tài nguyên v0.9.32 trong `--heal` (#1256, #1260, #1645, #1664)**: Tự động kích hoạt `mem::session-sweep` quét dọn session bỏ rơi, kiểm tra `mem:idx:bm25` `"legacy:sweep"`, lấy thống kê đồ thị giới hạn qua `mem::graph-stats` và tự động gỡ biến cũ `OPENAI_API_KEY_FOR_LLM`.
 - **v2.1 (2026-11-05)**:
-  - Bổ sung cơ chế tự chữa lành (`selfPatches`) trong `--heal` và `install.sh`: tự động patch lại `maxReads: 4096` (`maxBytes: 8MB`) trong `dist/index.mjs` sau mỗi lần nâng cấp npm và tự động thêm `AGENTMEMORY_LLM_PROVIDER=openai` vào `~/.agentmemory/.env` cho `@agentmemory/agentmemory` v0.9.32+.
-  - Bổ sung tự động khôi phục chỉ mục đồ thị (`POST /agentmemory/graph/index/resume`) trong `--heal` khi trạng thái index bị `paused` sau lúc khởi động lại daemon.
+  - Bổ sung cơ chế tự chữa lành (`selfPatches`) trong `--heal` và `install.sh` tự động patch lại `maxReads: 4096` (`8MB`) và thêm `AGENTMEMORY_LLM_PROVIDER=openai`.
+  - Bổ sung tự động khôi phục chỉ mục đồ thị (`POST /agentmemory/graph/index/resume`) trong `--heal`.
 - **v2.0 (2026-11-05)**:
-  - Thêm chế độ `--delete "<tên_hoặc_id>"` xóa vĩnh viễn node và cạnh liên đới trên cả 4 tầng KV qua `iii` WebSocket (`ws://127.0.0.1:49134`).
-  - Thêm chế độ `--heal` / `--drain` xả hàng đợi capture spool và kiểm tra sức khỏe chỉ mục.
-  - Bổ sung Auto-Anchor Visibility Protection (`pageNodes[0..24]`) và Same-Name Entity Collision Batching trong `--apply`.
-  - Bổ sung Multi-Pass Boundary Sweep trong `--beautify`.
-
+  - Thêm `--delete "<tên_hoặc_id>"`, `--heal` / `--drain`, Auto-Anchor Visibility Protection (`pageNodes[0..24]`), Same-Name Entity Collision Batching và Multi-Pass Boundary Sweep.

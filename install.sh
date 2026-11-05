@@ -6,7 +6,7 @@ AGENTS_SKILL_DIR="$HOME/.agents/skills/agentmemory-graph-linker"
 GEMINI_SKILL_DIR="$HOME/.gemini/config/skills/agentmemory-graph-linker"
 AGENTMEMORY_DIR="$HOME/.agentmemory"
 
-echo "==> Installing agentmemory-graph-linker skill..."
+echo "==> Installing agentmemory-graph-linker skill (v2.2)..."
 mkdir -p "$HOME/.agents/skills" "$HOME/.gemini/config/skills" "$AGENTMEMORY_DIR"
 rm -rf "$AGENTS_SKILL_DIR"
 cp -R "$REPO_DIR/skill/agentmemory-graph-linker" "$AGENTS_SKILL_DIR"
@@ -15,7 +15,7 @@ ln -sfn "$AGENTS_SKILL_DIR" "$GEMINI_SKILL_DIR"
 echo "    ✓ Skill installed at: $AGENTS_SKILL_DIR"
 echo "    ✓ Symlinked to:       $GEMINI_SKILL_DIR"
 
-echo "==> Installing Smart AI Router (secret-free, reads from ~/.agentmemory/.env)..."
+echo "==> Installing Smart AI Router v2.2 (secret-free, reads from ~/.agentmemory/.env)..."
 cp "$REPO_DIR/router/smart-router.mjs" "$AGENTMEMORY_DIR/smart-router.mjs"
 echo "    ✓ Copied smart-router.mjs to $AGENTMEMORY_DIR/smart-router.mjs"
 
@@ -30,6 +30,16 @@ if [ -f "$AGENTMEMORY_DIR/.env" ]; then
       fs.writeFileSync(p, c, "utf8");
     ' "$AGENTMEMORY_DIR/.env"
     echo "    ✓ Added AGENTMEMORY_LLM_PROVIDER=openai"
+  fi
+  if grep -q "^OPENAI_API_KEY_FOR_LLM=" "$AGENTMEMORY_DIR/.env"; then
+    echo "==> Removing deprecated OPENAI_API_KEY_FOR_LLM from $AGENTMEMORY_DIR/.env (#1664)..."
+    node -e '
+      const fs = require("fs");
+      const p = process.argv[1];
+      let c = fs.readFileSync(p, "utf8").replace(/^OPENAI_API_KEY_FOR_LLM=.*\n?/gm, "");
+      fs.writeFileSync(p, c, "utf8");
+    ' "$AGENTMEMORY_DIR/.env"
+    echo "    ✓ Removed deprecated OPENAI_API_KEY_FOR_LLM"
   fi
 fi
 

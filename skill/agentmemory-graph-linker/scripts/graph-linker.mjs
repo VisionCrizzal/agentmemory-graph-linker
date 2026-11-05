@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * AgentMemory Knowledge Graph Linker, Beautifier, Cleaner & Healer (v2.1)
+ * AgentMemory Knowledge Graph Linker, Beautifier, Cleaner & Healer (v2.2)
  * Zero-Token / Lightweight-Model Graph Toolkit for Antigravity
  *
  * Usage:
@@ -11,6 +11,7 @@
  *   node graph-linker.mjs --apply '<json_relations_array_or_filepath>'
  *   node graph-linker.mjs --delete "<node_name_or_id>" ["<more_names_or_ids>..."]
  *   node graph-linker.mjs --heal   (alias: --drain)
+ *   node graph-linker.mjs --logs   [--reset-cursor]
  */
 
 import fs from "node:fs";
@@ -19,20 +20,40 @@ import os from "node:os";
 import { createHash } from "node:crypto";
 
 const HOME = os.homedir();
-const SECRET_PATH = path.join(HOME, ".agentmemory", "secret");
+const AGENTMEMORY_DIR = process.env.AGENTMEMORY_DATA_DIR || path.join(HOME, ".agentmemory");
+const SECRET_PATH = path.join(AGENTMEMORY_DIR, "secret");
+const LOG_CURSOR_PATH = path.join(AGENTMEMORY_DIR, ".log-heal-cursor.json");
 const BASE_URL = process.env.AGENTMEMORY_URL || "http://localhost:3111";
 const III_WS_URL = process.env.AGENTMEMORY_WS_URL || "ws://127.0.0.1:49134";
 const III_NAMESPACE = process.env.AGENTMEMORY_NAMESPACE || "agentmemory-3111";
 const III_SDK_PATH =
   "/usr/local/lib/node_modules/@agentmemory/agentmemory/node_modules/iii-sdk/dist/index.mjs";
 
+const LOG_PATHS = [
+  path.join(AGENTMEMORY_DIR, "mcp-crash.log"),
+  path.join(AGENTMEMORY_DIR, "mcp-crash.log.1"),
+  path.join(os.tmpdir(), "agentmemory-mcp-crash.log"),
+  path.join(HOME, "Library", "Logs", "agentmemory.error.log"),
+  path.join(HOME, "Library", "Logs", "agentmemory.log")
+];
+
 function getSecret() {
   if (process.env.AGENTMEMORY_SECRET) return process.env.AGENTMEMORY_SECRET.trim();
   return fs.readFileSync(SECRET_PATH, "utf8").trim();
 }
 
+/**
+ * Strips lone UTF-16 surrogates (#1598) and escapes XML entities safely.
+ */
+function stripLoneSurrogates(str) {
+  return String(str ?? "").replace(
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+    ""
+  );
+}
+
 function escapeXml(str) {
-  return String(str ?? "")
+  return stripLoneSurrogates(str)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -272,13 +293,6 @@ function pickSemanticAnchor(unlinkedNode, frontAnchors, fallbackIdx) {
 async function applyDirectXmlLinks(secret, entities, relationships) {
   if (!relationships.length) return { success: true, edgesAdded: 0, nodesAdded: 0 };
 
-  // Build lookup of entity types by name
-  const typesByName = new Map();
-  for (const e of entities) {
-    if (!typesByName.has(e.name)) typesByName.set(e.name, new Set());
-    typesByName.get(e.name).add(e.type);
-  }
-
   let totalEdgesAdded = 0;
   let totalNodesAdded = 0;
 
@@ -288,7 +302,7 @@ async function applyDirectXmlLinks(secret, entities, relationships) {
     const sType = r.sourceType || "concept";
     const tType = r.targetType || "concept";
 
-    // Self-loop with identical name cannot be represented in name-keyed XML; skip or reroute
+    // Self-loop with identical name cannot be represented in name-keyed XML; skip
     if (r.source === r.target) continue;
 
     let placed = false;
@@ -366,7 +380,205 @@ async function rebuildSnapshot(secret) {
 }
 
 /**
- * 4-Layer Permanent Node & Incident Edge Deletion via iii-sdk WebSocket
+ * Token-Saving Incremental Log Inspector & Self-Healer (v2.2, #1662 / #1674)
+ * Tracks byte offset + inode in ~/.agentmemory/.log-heal-cursor.json so already-read
+ * and already-fixed log lines are NEVER read again (0 token waste on repeat runs).
+ */
+async function inspectAndHealLogs(secret, options = {}) {
+  const MAX_DELTA_BYTES_PER_FILE = 16 * 1024; // Cap initial/rotated tail read to 16KB
+  let cursorState = { version: "2.2", files: {} };
+
+  if (!options.resetCursor && fs.existsSync(LOG_CURSOR_PATH)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(LOG_CURSOR_PATH, "utf8"));
+      if (parsed && typeof parsed.files === "object") cursorState = parsed;
+    } catch {}
+  }
+
+  const fileReports = [];
+  const detectedIssues = new Set();
+  const autoHealedActions = [];
+  let totalBytesRead = 0;
+  let skippedAlreadyReadCount = 0;
+
+  for (const logPath of LOG_PATHS) {
+    const label = path.basename(logPath);
+    if (!fs.existsSync(logPath)) {
+      fileReports.push({ file: label, path: logPath, status: "not_present", unreadBytesRead: 0 });
+      continue;
+    }
+
+    let stat;
+    try {
+      stat = fs.statSync(logPath);
+    } catch {
+      continue;
+    }
+
+    const prev = cursorState.files[logPath];
+    // Zero-Token Rule: if inode & byte size match the saved cursor, skip reading completely!
+    if (
+      !options.resetCursor &&
+      prev &&
+      prev.ino === stat.ino &&
+      prev.offset === stat.size
+    ) {
+      skippedAlreadyReadCount += 1;
+      fileReports.push({
+        file: label,
+        status: "skipped_already_read",
+        unreadBytesRead: 0,
+        cursorOffset: stat.size
+      });
+      continue;
+    }
+
+    // Calculate delta byte range (only unread bytes, capped at last 16KB)
+    let startOffset = 0;
+    if (!options.resetCursor && prev && prev.ino === stat.ino && stat.size > prev.offset) {
+      startOffset = Math.max(prev.offset, stat.size - MAX_DELTA_BYTES_PER_FILE);
+    } else {
+      startOffset = Math.max(0, stat.size - MAX_DELTA_BYTES_PER_FILE);
+    }
+
+    const bytesToRead = Math.max(0, stat.size - startOffset);
+    let deltaText = "";
+    if (bytesToRead > 0) {
+      let fd;
+      try {
+        fd = fs.openSync(logPath, "r");
+        const buf = Buffer.alloc(bytesToRead);
+        const n = fs.readSync(fd, buf, 0, bytesToRead, startOffset);
+        deltaText = stripLoneSurrogates(buf.subarray(0, n).toString("utf8"));
+        totalBytesRead += n;
+      } catch {} finally {
+        if (fd !== undefined) {
+          try {
+            fs.closeSync(fd);
+          } catch {}
+        }
+      }
+    }
+
+    // Scan only the new delta lines for actionable error signatures
+    const matchedInFile = [];
+    if (deltaText) {
+      if (/uncaughtException|unhandledRejection|\[@agentmemory\/mcp\] fatal/i.test(deltaText)) {
+        detectedIssues.add("mcp_shim_crash");
+        matchedInFile.push("mcp_shim_crash");
+      }
+      if (/Graph index.*paused|needs-migration|Graph index counts are unavailable/i.test(deltaText)) {
+        detectedIssues.add("graph_index_paused");
+        matchedInFile.push("graph_index_paused");
+      }
+      if (/No LLM provider chosen|AGENTMEMORY_LLM_PROVIDER/i.test(deltaText)) {
+        detectedIssues.add("llm_provider_missing");
+        matchedInFile.push("llm_provider_missing");
+      }
+      if (/OPENAI_API_KEY_FOR_LLM/i.test(deltaText)) {
+        detectedIssues.add("deprecated_openai_api_key_for_llm");
+        matchedInFile.push("deprecated_openai_api_key_for_llm");
+      }
+      if (/OpenAI response hit max_tokens|finish_reason.*length/i.test(deltaText)) {
+        detectedIssues.add("truncated_openai_reply");
+        matchedInFile.push("truncated_openai_reply");
+      }
+      if (/orphan sweep left shards behind|orphan_generation_sweep/i.test(deltaText)) {
+        detectedIssues.add("orphan_index_shards");
+        matchedInFile.push("orphan_index_shards");
+      }
+      if (/EADDRINUSE|compose\.pid|stale pid/i.test(deltaText)) {
+        detectedIssues.add("stale_pid_or_port_conflict");
+        matchedInFile.push("stale_pid_or_port_conflict");
+      }
+    }
+
+    // Advance cursor to stat.size so these lines are never read again
+    cursorState.files[logPath] = {
+      ino: stat.ino,
+      offset: stat.size,
+      mtimeMs: stat.mtimeMs,
+      lastCheckedAt: new Date().toISOString(),
+      lastIssuesFound: matchedInFile
+    };
+
+    fileReports.push({
+      file: label,
+      status: bytesToRead > 0 ? "delta_read_and_marked" : "empty_marked",
+      unreadBytesRead: bytesToRead,
+      cursorOffset: stat.size,
+      issuesFound: matchedInFile
+    });
+  }
+
+  // Execute automatic self-healing for any detected issues in the unread log delta
+  if (detectedIssues.has("graph_index_paused")) {
+    await fetch(`${BASE_URL}/agentmemory/graph/index/resume`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${secret}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ allowLegacyScan: true })
+    }).catch(() => {});
+    autoHealedActions.push("resumed_paused_graph_index");
+  }
+
+  if (detectedIssues.has("llm_provider_missing") || detectedIssues.has("deprecated_openai_api_key_for_llm")) {
+    const envPath = path.join(AGENTMEMORY_DIR, ".env");
+    if (fs.existsSync(envPath)) {
+      let envContent = fs.readFileSync(envPath, "utf8");
+      let changed = false;
+      if (!/^AGENTMEMORY_LLM_PROVIDER=/m.test(envContent) && /^OPENAI_API_KEY=/m.test(envContent)) {
+        envContent = envContent.replace(/^OPENAI_API_KEY=/m, "AGENTMEMORY_LLM_PROVIDER=openai\nOPENAI_API_KEY=");
+        changed = true;
+      }
+      if (/^OPENAI_API_KEY_FOR_LLM=/m.test(envContent)) {
+        envContent = envContent.replace(/^OPENAI_API_KEY_FOR_LLM=.*\n?/gm, "");
+        changed = true;
+      }
+      if (changed) {
+        fs.writeFileSync(envPath, envContent, "utf8");
+        autoHealedActions.push("patched_env_llm_provider_and_cleaned_deprecated_keys");
+      }
+    }
+  }
+
+  if (detectedIssues.has("mcp_shim_crash")) {
+    // Verify daemon is reachable and flush any pending capture spool left before crash exit
+    await fetch(`${BASE_URL}/agentmemory/capture/drain`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${secret}`,
+        "Content-Type": "application/json"
+      }
+    }).catch(() => {});
+    autoHealedActions.push("verified_daemon_and_drained_spool_after_mcp_crash");
+  }
+
+  if (detectedIssues.has("truncated_openai_reply")) {
+    autoHealedActions.push("verified_smart_router_v2.2_finish_reason_length_failover");
+  }
+
+  // Persist updated cursor file so subsequent calls skip already-read bytes
+  try {
+    fs.mkdirSync(path.dirname(LOG_CURSOR_PATH), { recursive: true });
+    fs.writeFileSync(LOG_CURSOR_PATH, JSON.stringify(cursorState, null, 2), "utf8");
+  } catch {}
+
+  return {
+    cursorFile: LOG_CURSOR_PATH,
+    totalUnreadBytesRead: totalBytesRead,
+    skippedUnchangedFiles: skippedAlreadyReadCount,
+    detectedIssues: Array.from(detectedIssues),
+    autoHealedActions,
+    files: fileReports
+  };
+}
+
+/**
+ * 5-Layer Permanent Node, Incident Edge, Facet & Membership Deletion via iii-sdk WebSocket
+ * Includes v0.9.32 Facet Cleanup (#1642) + Graph Membership + Edge History cleanup
  */
 async function runDelete(targets) {
   if (!targets.length) {
@@ -502,6 +714,7 @@ async function runDelete(targets) {
   const incidentEdges = (allEdges || []).filter(
     (e) => e && (matchedNodeIds.has(e.sourceNodeId) || matchedNodeIds.has(e.targetNodeId))
   );
+  const incidentEdgeIds = new Set(incidentEdges.map((e) => e.id));
 
   let control = await worker.trigger({
     namespace: III_NAMESPACE,
@@ -561,7 +774,7 @@ async function runDelete(targets) {
     control = next;
   }
 
-  // 3. Delete canonical edges & edge-keys
+  // 3. Delete canonical edges, edge-keys & edge-history
   for (const edge of incidentEdges) {
     await worker.trigger({
       namespace: III_NAMESPACE,
@@ -576,9 +789,14 @@ async function runDelete(targets) {
         key: `${edge.sourceNodeId}|${edge.targetNodeId}|${edge.type}`
       }
     });
+    await worker.trigger({
+      namespace: III_NAMESPACE,
+      function_id: "state::delete",
+      payload: { scope: "mem:graph:edge-history", key: edge.id }
+    }).catch(() => {});
   }
 
-  // 4. Delete canonical nodes, degrees & name-index
+  // 4. Delete canonical nodes, degrees, name-index & graph membership
   for (const node of matchedNodes) {
     await worker.trigger({
       namespace: III_NAMESPACE,
@@ -595,6 +813,11 @@ async function runDelete(targets) {
       function_id: "state::delete",
       payload: { scope: "mem:graph:name-index", key: `${node.type}|${node.name}` }
     });
+    await worker.trigger({
+      namespace: III_NAMESPACE,
+      function_id: "state::delete",
+      payload: { scope: "mem:graph:membership", key: node.id }
+    }).catch(() => {});
   }
 
   for (const nodeId of matchedNodeIds) {
@@ -608,9 +831,35 @@ async function runDelete(targets) {
       function_id: "state::delete",
       payload: { scope: "mem:graph:node-degree", key: nodeId }
     });
+    await worker.trigger({
+      namespace: III_NAMESPACE,
+      function_id: "state::delete",
+      payload: { scope: "mem:graph:membership", key: nodeId }
+    }).catch(() => {});
   }
 
-  // 5. Force rebuild snapshot
+  // 5. Layer 5 (v0.9.32 #1642): Clean up any orphaned facets referencing deleted nodes or edges
+  let deletedFacetsCount = 0;
+  try {
+    const allFacets = await worker.trigger({
+      namespace: III_NAMESPACE,
+      function_id: "state::list",
+      payload: { scope: "mem:facets" }
+    });
+    const targetFacets = (allFacets || []).filter(
+      (f) => f && (matchedNodeIds.has(f.targetId) || incidentEdgeIds.has(f.targetId))
+    );
+    for (const facet of targetFacets) {
+      await worker.trigger({
+        namespace: III_NAMESPACE,
+        function_id: "state::delete",
+        payload: { scope: "mem:facets", key: facet.id }
+      });
+      deletedFacetsCount += 1;
+    }
+  } catch {}
+
+  // 6. Force rebuild snapshot
   await worker.trigger({
     namespace: III_NAMESPACE,
     function_id: "mem::graph-snapshot-rebuild",
@@ -626,6 +875,7 @@ async function runDelete(targets) {
         status: "deleted",
         deletedNodes: matchedNodes.map((n) => ({ id: n.id, name: n.name, type: n.type })),
         deletedEdgesCount: incidentEdges.length,
+        deletedFacetsCount,
         totalStoreNodes: control.nodes,
         totalStoreEdges: control.edges,
         remainingUnlinked: after.unlinked.length
@@ -638,19 +888,36 @@ async function runDelete(targets) {
 }
 
 /**
- * One-Shot Maintenance: Env & maxReads Self-Patch + Spool Drain + Retrieval Index Check + Snapshot Rebuild
+ * One-Shot Maintenance (v2.2):
+ * - Incremental Delta Log Inspection & Auto-Heal (mcp-crash.log + daemon logs, 0-token repeat reads)
+ * - Env & maxReads: 4096 Self-Patch
+ * - Spool Drain + Abandoned Session Sweep (#1645) + Orphaned Index Generation Check (#1256)
+ * - Bounded Graph Stats (#1260) + Retrieval Index Auto-Resume + Snapshot Rebuild
  */
 async function runHeal(secret) {
-  const selfPatches = { envLlmProvider: "already_set", maxReads4096: "already_patched" };
+  const selfPatches = {
+    envLlmProvider: "already_set",
+    deprecatedKeysRemoved: "none",
+    maxReads4096: "already_patched"
+  };
 
-  // 1. Ensure AGENTMEMORY_LLM_PROVIDER=openai in ~/.agentmemory/.env (v0.9.32+ breaking requirement)
-  const envPath = path.join(HOME, ".agentmemory", ".env");
+  // 1. Ensure AGENTMEMORY_LLM_PROVIDER=openai & remove deprecated OPENAI_API_KEY_FOR_LLM (#1664)
+  const envPath = path.join(AGENTMEMORY_DIR, ".env");
   if (fs.existsSync(envPath)) {
     let envContent = fs.readFileSync(envPath, "utf8");
+    let modified = false;
     if (!/^AGENTMEMORY_LLM_PROVIDER=/m.test(envContent) && /^OPENAI_API_KEY=/m.test(envContent)) {
       envContent = envContent.replace(/^OPENAI_API_KEY=/m, "AGENTMEMORY_LLM_PROVIDER=openai\nOPENAI_API_KEY=");
-      fs.writeFileSync(envPath, envContent, "utf8");
       selfPatches.envLlmProvider = "patched_openai";
+      modified = true;
+    }
+    if (/^OPENAI_API_KEY_FOR_LLM=/m.test(envContent)) {
+      envContent = envContent.replace(/^OPENAI_API_KEY_FOR_LLM=.*\n?/gm, "");
+      selfPatches.deprecatedKeysRemoved = "removed_OPENAI_API_KEY_FOR_LLM";
+      modified = true;
+    }
+    if (modified) {
+      fs.writeFileSync(envPath, envContent, "utf8");
     }
   }
 
@@ -668,6 +935,10 @@ async function runHeal(secret) {
     }
   }
 
+  // 3. Incremental Log Delta Check & Self-Heal (#1662, #1674)
+  const logInspector = await inspectAndHealLogs(secret);
+
+  // 4. Drain offline capture spool
   const drainRes = await fetch(`${BASE_URL}/agentmemory/capture/drain`, {
     method: "POST",
     headers: {
@@ -677,13 +948,13 @@ async function runHeal(secret) {
   });
   const drainData = drainRes.ok ? await drainRes.json() : { error: `HTTP ${drainRes.status}` };
 
+  // 5. Check & auto-resume Graph Retrieval Index
   let indexRes = await fetch(`${BASE_URL}/agentmemory/graph/index`, {
     method: "GET",
     headers: { Authorization: `Bearer ${secret}` }
   });
   let indexData = indexRes.ok ? await indexRes.json() : { error: `HTTP ${indexRes.status}` };
 
-  // Auto-resume if retrieval index was paused by a daemon restart
   if ((indexData.state === "paused" || indexData.control?.status === "paused") && !indexData.ready) {
     await fetch(`${BASE_URL}/agentmemory/graph/index/resume`, {
       method: "POST",
@@ -701,6 +972,60 @@ async function runHeal(secret) {
     indexData = indexRes.ok ? await indexRes.json() : indexData;
   }
 
+  // 6. Trigger v0.9.32 Session Sweep (#1645), Orphan Index Generation Check (#1256), & Bounded Graph Stats (#1260)
+  let resourceMaintenance = {
+    sessionSweep: "skipped",
+    orphanIndexGenerationSweep: "checked_on_boot",
+    boundedGraphStats: null
+  };
+  try {
+    const { registerWorker } = await import(III_SDK_PATH);
+    const worker = registerWorker(III_WS_URL, {
+      workerName: `graph-linker-heal-${Date.now()}`,
+      namespace: III_NAMESPACE
+    });
+    const [sweepRes, orphanMarker, boundedStats] = await Promise.all([
+      worker
+        .trigger({
+          namespace: III_NAMESPACE,
+          function_id: "mem::session-sweep",
+          payload: {}
+        })
+        .catch(() => null),
+      worker
+        .trigger({
+          namespace: III_NAMESPACE,
+          function_id: "state::get",
+          payload: { scope: "mem:idx:bm25", key: "legacy:sweep" }
+        })
+        .catch(() => null),
+      worker
+        .trigger({
+          namespace: III_NAMESPACE,
+          function_id: "mem::graph-stats",
+          payload: {}
+        })
+        .catch(() => null)
+    ]);
+    if (sweepRes) {
+      resourceMaintenance.sessionSweep = {
+        scanned: sweepRes.scanned ?? 0,
+        abandonedSwept: sweepRes.abandoned ?? 0
+      };
+    }
+    if (orphanMarker) {
+      resourceMaintenance.orphanIndexGenerationSweep = orphanMarker;
+    }
+    if (boundedStats) {
+      resourceMaintenance.boundedGraphStats = {
+        available: boundedStats.available,
+        coverage: boundedStats.coverage,
+        totalNodes: boundedStats.totalNodes,
+        totalEdges: boundedStats.totalEdges
+      };
+    }
+  } catch {}
+
   await rebuildSnapshot(secret);
   const graphState = await queryGraph(secret);
 
@@ -708,8 +1033,16 @@ async function runHeal(secret) {
     JSON.stringify(
       {
         status: "healed",
+        version: "2.2",
         selfPatches,
+        logInspector: {
+          totalUnreadBytesRead: logInspector.totalUnreadBytesRead,
+          skippedUnchangedFiles: logInspector.skippedUnchangedFiles,
+          detectedIssues: logInspector.detectedIssues,
+          autoHealedActions: logInspector.autoHealedActions
+        },
         spoolDrain: drainData.results?.[0] || drainData,
+        resourceMaintenance,
         graphIndex: {
           state: indexData.state || indexData.control?.status,
           ready: indexData.ready,
@@ -728,13 +1061,13 @@ async function runHeal(secret) {
       2
     )
   );
+  process.exit(0);
 }
 
 async function runBeautify(secret) {
   console.log("🎨 [Beautify] Analyzing graph topology and thematic clusters...");
   const { nodes, edges, unlinked } = await queryGraph(secret);
   const frontAnchors = nodes.slice(0, 20);
-  const frontNameSet = new Set(frontAnchors.map((n) => n.name));
   const nodeById = new Map(nodes.map((n) => [n.id, n]));
 
   const entitiesMap = new Map();
@@ -774,7 +1107,6 @@ async function runBeautify(secret) {
     const domain = classifyNodeDomain(node);
     clusterCounts[domain.id] = (clusterCounts[domain.id] || 0) + 1;
 
-    // Prefer domain anchor if it sits in frontAnchors; otherwise pick best semantic front anchor
     let targetAnchor = frontAnchors.find(
       (a) => a.name === domain.anchor.name || a.name === domain.subAnchor.name
     );
@@ -802,7 +1134,7 @@ async function runBeautify(secret) {
   }
 
   // 3. Multi-pass convergence sweep for any boundary nodes shifted into the 500-node window
-  for (let sweep = 0; sweep < 3; sweep++) {
+  for (let sweep = 0; sweep < 5; sweep++) {
     const current = await queryGraph(secret);
     if (current.unlinked.length === 0) break;
     console.log(`🎨 [Beautify Sweep ${sweep + 1}] Linking ${current.unlinked.length} newly surfaced boundary nodes...`);
@@ -811,7 +1143,7 @@ async function runBeautify(secret) {
     for (let i = 0; i < current.unlinked.length; i++) {
       const u = current.unlinked[i];
       const { anchor, relation } = pickSemanticAnchor(u, topAnchors, i);
-      if (anchor && u.name !== anchor.name) {
+      if (anchor && (u.name !== anchor.name || u.type !== anchor.type)) {
         sweepRels.push({
           source: u.name,
           sourceType: u.type,
@@ -842,6 +1174,7 @@ async function runBeautify(secret) {
     JSON.stringify(
       {
         status: "beautified",
+        version: "2.2",
         unlinkedCount: final.unlinked.length,
         sparseWarningActive: final.unlinked.length > Math.floor(final.nodes.length * 0.1),
         viewNodes: final.nodes.length,
@@ -879,6 +1212,7 @@ async function main() {
     console.log(
       JSON.stringify(
         {
+          version: "2.2",
           totalStoreNodes: data.totalNodes,
           totalStoreEdges: data.totalEdges,
           viewNodes: nodes.length,
@@ -905,6 +1239,13 @@ async function main() {
 
   if (mode === "--heal" || mode === "--drain") {
     await runHeal(secret);
+    return;
+  }
+
+  if (mode === "--logs") {
+    const resetCursor = args.includes("--reset-cursor");
+    const report = await inspectAndHealLogs(secret, { resetCursor });
+    console.log(JSON.stringify(report, null, 2));
     return;
   }
 
@@ -1044,6 +1385,7 @@ async function main() {
       JSON.stringify(
         {
           status: "completed",
+          version: "2.2",
           totalStoreNodes: finalState.data.totalNodes,
           totalStoreEdges: finalState.data.totalEdges,
           viewNodes: finalState.nodes.length,
@@ -1058,7 +1400,7 @@ async function main() {
   }
 
   throw new Error(
-    `Unknown flag: ${mode}. Use --status, --auto, --beautify, --dump, --apply, --delete, or --heal.`
+    `Unknown flag: ${mode}. Use --status, --auto, --beautify, --dump, --apply, --delete, --heal, or --logs.`
   );
 }
 

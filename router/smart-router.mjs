@@ -3,6 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
+/**
+ * AgentMemory 11-Tier Fault-Tolerant Smart AI Router (v2.2)
+ * - Surrogate-safe UTF-16 prompt & fallback slicing (#1598)
+ * - Truncated reply (finish_reason === "length" / unclosed XML) detection & automatic tier failover (#1495)
+ * - Instant Zero-Token DIRECT_GRAPH_XML passthrough (<1ms)
+ */
+
 function loadEnvFile() {
   const envPath = path.join(os.homedir(), ".agentmemory", ".env");
   const vars = {};
@@ -58,6 +65,26 @@ const TARGETS = [
     timeoutMs: 15000
   },
   {
+    name: "Gemini Flash Lite (Google AI Studio - Fast Quota)",
+    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    headers: {
+      "Authorization": `Bearer ${GEMINI_KEY}`,
+      "Content-Type": "application/json"
+    },
+    model: "gemini-flash-lite-latest",
+    timeoutMs: 12000
+  },
+  {
+    name: "Gemini 2.5 Flash (Google AI Studio - Stable)",
+    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    headers: {
+      "Authorization": `Bearer ${GEMINI_KEY}`,
+      "Content-Type": "application/json"
+    },
+    model: "gemini-2.5-flash",
+    timeoutMs: 15000
+  },
+  {
     name: "Gemma 4 26B MoE (Google High-Quota Fast Pool)",
     url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
     headers: {
@@ -65,17 +92,7 @@ const TARGETS = [
       "Content-Type": "application/json"
     },
     model: "gemma-4-26b-a4b-it",
-    timeoutMs: 18000
-  },
-  {
-    name: "Gemma 4 31B IT (Google High-Quota Pool)",
-    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-    headers: {
-      "Authorization": `Bearer ${GEMINI_KEY}`,
-      "Content-Type": "application/json"
-    },
-    model: "gemma-4-31b-it",
-    timeoutMs: 20000
+    timeoutMs: 15000
   },
   {
     name: "Gemini 3.8 Flash (Google AI Studio)",
@@ -85,26 +102,6 @@ const TARGETS = [
       "Content-Type": "application/json"
     },
     model: "gemini-3.8-flash",
-    timeoutMs: 15000
-  },
-  {
-    name: "Gemini 3.5 Flash (Google AI Studio)",
-    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-    headers: {
-      "Authorization": `Bearer ${GEMINI_KEY}`,
-      "Content-Type": "application/json"
-    },
-    model: "gemini-3.5-flash",
-    timeoutMs: 15000
-  },
-  {
-    name: "Gemini Flash Lite (Google AI Studio)",
-    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-    headers: {
-      "Authorization": `Bearer ${GEMINI_KEY}`,
-      "Content-Type": "application/json"
-    },
-    model: "gemini-flash-lite-latest",
     timeoutMs: 15000
   },
   {
@@ -139,10 +136,36 @@ function markCooldown(target, status, errText = "") {
   let ms = 45000; // default 45s cooldown for per-minute rate limits or offline local nodes
   if (status === 429 && (errText.includes("tokens per day") || errText.includes("PerDay"))) {
     ms = 10 * 60 * 1000; // 10 min cooldown for daily quota exhaustion
+  } else if (status === 499) {
+    ms = 15 * 1000; // 15s cooldown when a model hits max_tokens truncation (#1495)
   } else if (target.url.includes("127.0.0.1:8080") || target.url.includes("192.168.1.231:8080")) {
     ms = 120 * 1000; // 2 min cooldown when Z Fold 3 is unplugged/offline
   }
   cooldownUntil.set(target.name, Date.now() + ms);
+}
+
+/**
+ * Surrogate-safe UTF-16 string slicing (#1598)
+ * Prevents splitting high/low surrogate pairs (emojis, CJK, mathematical symbols)
+ */
+function sliceHeadSurrogateSafe(str, maxLen) {
+  if (typeof str !== "string" || str.length <= maxLen) return str;
+  let end = maxLen;
+  if (end > 0) {
+    const code = str.charCodeAt(end - 1);
+    if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  }
+  return str.slice(0, end);
+}
+
+function sliceTailSurrogateSafe(str, maxLen) {
+  if (typeof str !== "string" || str.length <= maxLen) return str;
+  let start = str.length - maxLen;
+  if (start < str.length) {
+    const code = str.charCodeAt(start);
+    if (code >= 0xdc00 && code <= 0xdfff) start += 1;
+  }
+  return str.slice(start);
 }
 
 function sanitizeForTarget(payload) {
@@ -160,9 +183,9 @@ function sanitizeForTarget(payload) {
     const keepHead = 3500;
     const keepTail = 4500;
     const content =
-      m.content.slice(0, keepHead) +
+      sliceHeadSurrogateSafe(m.content, keepHead) +
       "\n\n...[trimmed middle observations to stay within rate & latency limits]...\n\n" +
-      m.content.slice(-keepTail);
+      sliceTailSurrogateSafe(m.content, keepTail);
     return { ...m, content };
   });
 
@@ -173,26 +196,74 @@ function escapeXmlBareAmpersands(xml) {
   return xml.replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[\da-fA-F]+);)/g, "&amp;");
 }
 
-function cleanResponseData(rawText) {
+/**
+ * Cleans LLM output and detects truncated replies (#1495).
+ * Returns { ok: boolean, data?: string, reason?: string }
+ */
+function inspectAndCleanResponse(rawText, expectedFormat = "any") {
   try {
     const obj = JSON.parse(rawText);
-    if (Array.isArray(obj.choices)) {
-      for (const c of obj.choices) {
-        if (typeof c?.message?.content === "string") {
-          let text = c.message.content;
-          if (text.includes("</thought>") || text.includes("</think>")) {
-            text = text.replace(/<(?:thought|think)>[\s\S]*?<\/(?:thought|think)>\s*/gi, "").trim();
-          }
-          if (text.includes("<summary>") || text.includes("<observation>")) {
-            text = escapeXmlBareAmpersands(text);
-          }
-          c.message.content = text;
+    if (!Array.isArray(obj.choices) || obj.choices.length === 0) {
+      return { ok: false, reason: "empty_choices" };
+    }
+
+    for (const c of obj.choices) {
+      const finishReason = c?.finish_reason;
+      const rawContent = typeof c?.message?.content === "string" ? c.message.content : "";
+
+      // Strip thought / think tags (including unclosed blocks)
+      let text = rawContent
+        .replace(/<(?:thought|think)>[\s\S]*?(?:<\/(?:thought|think)>|(?=<(?:summary|observation|entities)>))/gi, "")
+        .trim();
+
+      // #1495: Reject responses cut off at max_tokens before finishing content
+      if (finishReason === "length") {
+        const hasCompleteSummary = /<summary>[\s\S]*?<\/summary>/i.test(text);
+        const hasCompleteObs = /<observation>[\s\S]*?<\/observation>/i.test(text);
+        const hasCompleteGraph = /<entities>[\s\S]*?<\/relationships>/i.test(text);
+        if (!hasCompleteSummary && !hasCompleteObs && !hasCompleteGraph) {
+          return { ok: false, reason: "finish_reason_length_truncated" };
         }
       }
-      return JSON.stringify(obj);
+
+      if (!text) {
+        return { ok: false, reason: "empty_content_after_think_strip" };
+      }
+
+      // Check for truncated XML when specific XML structure is expected (#1495)
+      if (expectedFormat === "summary" && text.includes("<summary>") && !/<\/summary>/i.test(text)) {
+        return { ok: false, reason: "unclosed_summary_xml" };
+      }
+      if (expectedFormat === "observation" && text.includes("<observation>") && !/<\/observation>/i.test(text)) {
+        return { ok: false, reason: "unclosed_observation_xml" };
+      }
+      if (expectedFormat === "graph" && text.includes("<entities>") && !/<\/relationships>/i.test(text)) {
+        return { ok: false, reason: "unclosed_graph_xml" };
+      }
+
+      // Extract exact target XML if wrapped in markdown or conversational chatter
+      if (text.includes("<summary>")) {
+        const m = text.match(/<summary>[\s\S]*?<\/summary>/i);
+        if (m) text = m[0];
+        text = escapeXmlBareAmpersands(text);
+      } else if (text.includes("<observation>")) {
+        const m = text.match(/<observation>[\s\S]*?<\/observation>/i);
+        if (m) text = m[0];
+        text = escapeXmlBareAmpersands(text);
+      } else if (text.includes("<entities>")) {
+        const m = text.match(/<entities>[\s\S]*?<\/relationships>/i);
+        if (m) text = m[0];
+        text = escapeXmlBareAmpersands(text);
+      }
+
+      c.message.content = text.trim();
+      c.finish_reason = "stop";
     }
-  } catch {}
-  return rawText;
+
+    return { ok: true, data: JSON.stringify(obj) };
+  } catch (err) {
+    return { ok: false, reason: `invalid_json: ${err.message}` };
+  }
 }
 
 function escapeXml(str) {
@@ -214,8 +285,7 @@ function buildLocalExtractiveFallback(parsed) {
 
   let content = "";
 
-  if (systemMsg.includes("<summary>")) {
-    // Session summary or chunk reduce fallback
+  if (systemMsg.includes("<summary>") || systemMsg.includes("session summarizer") || systemMsg.includes("merging multiple partial summaries")) {
     const titles = [];
     for (const m of userMsg.matchAll(/(?:\[\d+\]\s+[a-z_]+:\s+|Title:\s+)([^\n]+)/gi)) {
       const t = m[1].trim();
@@ -234,11 +304,11 @@ function buildLocalExtractiveFallback(parsed) {
       }
     }
 
-    const mainTitle = (titles[titles.length - 1] || titles[0] || "Coding & System Optimization Session").slice(0, 95);
+    const mainTitle = sliceHeadSurrogateSafe(titles[titles.length - 1] || titles[0] || "Coding & System Optimization Session", 95);
     const sampleTitles = titles.slice(-6).join("; ") || "Executed project tasks, diagnostics, and configuration updates";
     const narrative = `Completed session activities across ${titles.length || 1} key milestones: ${sampleTitles}. All observations and state changes were captured and indexed in AgentMemory.`;
     const decisionList = (titles.slice(0, 4).length ? titles.slice(0, 4) : ["Completed automated session state verification and memory indexing"])
-      .map((d) => `    <decision>${escapeXml(d.slice(0, 140))}</decision>`)
+      .map((d) => `    <decision>${escapeXml(sliceHeadSurrogateSafe(d, 140))}</decision>`)
       .join("\n");
     const fileList = (files.slice(0, 12).length ? files.slice(0, 12) : ["~/.agentmemory/.env"])
       .map((f) => `    <file>${escapeXml(f)}</file>`)
@@ -261,7 +331,6 @@ ${conceptList}
   </concepts>
 </summary>`;
   } else if (systemMsg.includes("<observation>")) {
-    // Observation compression fallback
     const toolMatch = /Tool:\s*([^\n]+)/i.exec(userMsg);
     const hookMatch = /Hook:\s*([^\n]+)/i.exec(userMsg);
     const toolName = toolMatch ? toolMatch[1].trim() : hookMatch ? hookMatch[1].trim() : "operation";
@@ -277,15 +346,15 @@ ${conceptList}
       .split("\n")
       .map((l) => l.trim())
       .find((l) => l.length > 15 && !l.startsWith("Timestamp:") && !l.startsWith("Hook:") && !l.startsWith("Tool:")) || `Executed ${toolName}`;
-    const title = `${toolName}: ${firstLine}`.slice(0, 75);
-    const narrative = `Executed ${toolName} during coding session (${firstLine.slice(0, 120)}). Output was captured and indexed for session memory retrieval.`;
+    const title = sliceHeadSurrogateSafe(`${toolName}: ${firstLine}`, 75);
+    const narrative = `Executed ${toolName} during coding session (${sliceHeadSurrogateSafe(firstLine, 120)}). Output was captured and indexed for session memory retrieval.`;
 
     content = `<observation>
   <type>${obsType}</type>
   <title>${escapeXml(title)}</title>
   <subtitle>${escapeXml(toolName)}</subtitle>
   <facts>
-    <fact>${escapeXml(firstLine.slice(0, 160))}</fact>
+    <fact>${escapeXml(sliceHeadSurrogateSafe(firstLine, 160))}</fact>
     <fact>Processed via ${escapeXml(toolName)}</fact>
   </facts>
   <narrative>${escapeXml(narrative)}</narrative>
@@ -331,6 +400,12 @@ const server = http.createServer(async (req, res) => {
     res.end(
       JSON.stringify({
         status: "ok",
+        version: "2.2",
+        features: [
+          "surrogate-safe-truncation (#1598)",
+          "max_tokens-truncated-reply-failover (#1495)",
+          "direct-graph-xml-zero-token-passthrough"
+        ],
         chain: [...TARGETS.map((t) => t.name), "Local Extractive Fallback (Zero-Fail Safety Net)"]
       })
     );
@@ -352,11 +427,19 @@ const server = http.createServer(async (req, res) => {
   const sanitized = sanitizeForTarget(parsed);
 
   // Instant Zero-Token Passthrough for Direct Graph Linking (<entities>...<relationships>...)
-  const allUserText = (Array.isArray(parsed?.messages) ? parsed.messages : [])
+  const messages = Array.isArray(parsed?.messages) ? parsed.messages : [];
+  const systemMsg = messages.find((m) => m.role === "system")?.content || "";
+  const allUserText = messages
     .filter((m) => m.role === "user")
     .map((m) => m.content || "")
     .join("\n");
-  if (allUserText.includes("DIRECT_GRAPH_XML")) {
+
+  const isSummarize = systemMsg.includes("<summary>") || systemMsg.includes("session summarizer") || systemMsg.includes("merging multiple partial summaries");
+  const isObservation = systemMsg.includes("<observation>");
+  const isGraphExtraction = systemMsg.includes("knowledge graph extraction") || systemMsg.includes("<entities>");
+  const expectedFormat = isSummarize ? "summary" : isObservation ? "observation" : isGraphExtraction ? "graph" : "any";
+
+  if (!isSummarize && isGraphExtraction && allUserText.includes("DIRECT_GRAPH_XML")) {
     const xmlMatch = allUserText.match(/<entities>[\s\S]*?<\/relationships>/);
     if (xmlMatch) {
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -396,14 +479,21 @@ const server = http.createServer(async (req, res) => {
       clearTimeout(timeout);
 
       if (response.ok) {
-        const data = cleanResponseData(await response.text());
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(data);
-        return;
+        const rawText = await response.text();
+        const inspected = inspectAndCleanResponse(rawText, expectedFormat);
+        if (inspected.ok) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(inspected.data);
+          return;
+        }
+        // #1495: Truncated or malformed reply -> fail over to next tier instead of storing broken data
+        markCooldown(target, 499, inspected.reason);
+        console.log(`[Router] ${target.name} rejected (${inspected.reason}) -> failing over to next tier...`);
+        continue;
       }
       const errText = await response.text();
       markCooldown(target, response.status, errText);
-      console.log(`[Router] ${target.name} returned ${response.status} (cooling down): ${errText.slice(0, 140)}`);
+      console.log(`[Router] ${target.name} returned ${response.status} (cooling down): ${sliceHeadSurrogateSafe(errText, 140)}`);
     } catch (err) {
       markCooldown(target, 0, err.message);
       console.log(`[Router] ${target.name} unreachable (${err.message}), cooling down & falling back...`);
@@ -417,5 +507,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, "127.0.0.1", () => {
-  console.log(`Smart AI Router listening on http://127.0.0.1:${PORT}`);
+  console.log(`Smart AI Router v2.2 listening on http://127.0.0.1:${PORT}`);
 });

@@ -1,32 +1,31 @@
-# AgentMemory Knowledge Graph Linker, Cleaner & Smart AI Router (v2.1)
+# AgentMemory Knowledge Graph Linker, Cleaner & Smart AI Router (v2.2)
 
 🌐 **Language / Ngôn ngữ:** **🇬🇧 English** | [🇻🇳 Tiếng Việt](./README-VN.md)
 
-A lightweight **Antigravity Skill (`agentmemory-graph-linker`)** and **11-Tier Smart AI Router** that links isolated (`UNLINKED / NO RELATIONS YET`) nodes, permanently deletes unwanted nodes across all 4 KV storage layers, drains offline capture spools, and balances thematic clusters in the `@agentmemory/agentmemory` Knowledge Graph (`http://localhost:3113/#graph`) in **a single command with zero external LLM token usage**.
+A lightweight **Antigravity Skill (`agentmemory-graph-linker`)** and **11-Tier Smart AI Router** that links isolated (`UNLINKED / NO RELATIONS YET`) nodes, permanently deletes unwanted nodes across all 5 KV storage layers (including `mem:facets`), drains offline capture spools, incrementally inspects & heals `mcp-crash.log` and daemon logs with a **0-token byte-offset cursor**, and balances thematic clusters in the `@agentmemory/agentmemory` Knowledge Graph (`http://localhost:3113/#graph`).
 
 ---
 
-## ✨ Key Features (v2.1)
+## ✨ Key Features (v2.2)
 
-1. **Zero-Token Direct Graph Linking (`DIRECT_GRAPH_XML`)**:
-   - Connects all `UNLINKED` nodes in `< 2 seconds` with **zero cloud LLM calls** (saving expensive frontier model quotas).
-   - Preserves **100% of node types verbatim** (`concept`, `file` with or without file extensions, `command`, `library`, `person`, `error`, `decision`, `function`, `pattern`, `entity`), avoiding the type-remapping limitations of `import-graphify`.
-   - **Same-Name Entity Collision Batching**: Automatically splits XML batches when two entities share the same `name` with different `type` (e.g. `Zalo` as `entity` vs `library`) so `parseGraphXml` never overwrites node types.
-2. **4-Layer Permanent Node & Edge Deletion (`--delete`)**:
-   - Connects directly to the `iii` engine WebSocket (`ws://127.0.0.1:49134`, namespace `agentmemory-3111`) to permanently remove unwanted nodes and their incident edges across all 4 storage layers:
+1. **Zero-Token Incremental Log Inspector & Self-Healer (`--logs` & `--heal`, #1662 / #1674)**:
+   - Connects directly to `~/.agentmemory/mcp-crash.log` (and rotated `mcp-crash.log.1` / `$TMPDIR/agentmemory-mcp-crash.log`), `~/Library/Logs/agentmemory.error.log`, and `~/Library/Logs/agentmemory.log`.
+   - Tracks `{ ino, offset, mtimeMs }` in `~/.agentmemory/.log-heal-cursor.json` so **files and log lines that have already been read and fixed are never read again** (`unreadBytesRead: 0`, `status: "skipped_already_read"`), saving 100% of tokens on subsequent checks.
+2. **Smart AI Router v2.2 with Truncated Reply Failover (#1495) & Surrogate-Safe Slicing (#1598)**:
+   - **Truncated Reply Failover (#1495)**: Detects `finish_reason === "length"` (`max_tokens` hit) as well as unclosed `<summary>`, `<observation>`, or `<entities>` XML tags, automatically placing the truncated upstream tier on a 15s cooldown and failing over to the next tier in the 11-tier chain instead of storing incomplete memories.
+   - **Surrogate-Safe UTF-16 Truncation (#1598)**: `sliceHeadSurrogateSafe()` and `sliceTailSurrogateSafe()` ensure prompt compaction (`12,000` chars) and fallback synthesis never split UTF-16 surrogate pairs (emojis, CJK, mathematical symbols).
+3. **5-Layer Permanent Node, Edge & Facet Deletion (`--delete`, #1642)**:
+   - Connects directly to the `iii` engine WebSocket (`ws://127.0.0.1:49134`, namespace `agentmemory-3111`) to permanently remove unwanted nodes, incident edges, and orphaned facets across all 5 storage layers:
      1. `mem:graph:retrieval-data` (unlinks doubly-linked postings and clears `row: null`)
      2. `mem:graph:retrieval-control` (decrements node/edge counters and bumps `revision`)
-     3. `mem:graph:nodes`, `mem:graph:edges`, `mem:graph:node-degree`
+     3. `mem:graph:nodes`, `mem:graph:edges`, `mem:graph:node-degree`, `mem:graph:membership`, `mem:graph:edge-history`
      4. `mem:graph:name-index`, `mem:graph:edge-key`, and rebuilds `mem:graph:snapshot`
-3. **One-Shot Self-Healing & Spool Drain (`--heal` / `--drain`)**:
-   - **Self-Patches `maxReads: 4096` (`8MB`)**: Automatically detects if an `npm install -g @agentmemory/agentmemory` upgrade reset `dist/index.mjs` back to `maxReads: 2048` and re-patches it to `4096`.
-   - **Self-Patches `AGENTMEMORY_LLM_PROVIDER=openai`**: Ensures `~/.agentmemory/.env` complies with `@agentmemory/agentmemory` v0.9.32+ breaking requirements so `/agentmemory/graph/extract` stays enabled.
-   - **Auto-Resumes Paused Graph Index**: Automatically calls `POST /agentmemory/graph/index/resume` if the retrieval index entered `paused` state during a daemon restart, drains the offline capture spool (`/agentmemory/capture/drain`), and rebuilds the snapshot.
-4. **Front-of-Queue LIFO Anchor Algorithm & Auto-Anchor Visibility Protection**:
-   - Engineered around AgentMemory's doubly-linked LIFO `"nodes"` and `"adjacency"` posting lists so newly created edges attach to `pageNodes[0..24]` and are guaranteed to be read within the `maxReads: 4096` KV budget.
-   - In `--apply`, deep chains (`idx >= 25`) automatically receive a visibility bridge to `pageNodes[0..24]`.
-5. **11-Tier Fault-Tolerant Smart AI Router (`router/smart-router.mjs`)**:
-   - Routes background AgentMemory compression and summarization across Groq (`gpt-oss-20b`, `qwen3.8-27b`, `gpt-oss-120b`) $\rightarrow$ Google Gemma 4 (`26B MoE`, `31B IT`) $\rightarrow$ Gemini (`3.8 Flash`, `3.5 Flash`, `Flash Lite`) $\rightarrow$ Local Edge AI Node $\rightarrow$ **Zero-Fail Local Extractive Fallback**.
+     5. `mem:facets` (purges orphaned facets referencing deleted nodes or edges, #1642)
+4. **One-Shot Self-Healing, Session Sweep & Resource Recovery (`--heal` / `--drain`)**:
+   - **Self-Patches `maxReads: 4096` (`8MB`) & `AGENTMEMORY_LLM_PROVIDER=openai`**: Automatically restores `maxReads: 4096` after npm upgrades, ensures `AGENTMEMORY_LLM_PROVIDER=openai` in `~/.agentmemory/.env`, and removes deprecated `OPENAI_API_KEY_FOR_LLM` (#1664).
+   - **Abandoned Session Sweep (#1645), Orphaned Index Generation Check (#1256) & Bounded Graph Stats (#1260)**: Triggers `mem::session-sweep` for stale active sessions, checks `mem:idx:bm25` `"legacy:sweep"`, queries `mem::graph-stats`, drains the capture spool (`/agentmemory/capture/drain`), auto-resumes paused graph indexes, and rebuilds the snapshot.
+5. **Zero-Token Direct Graph Linking (`DIRECT_GRAPH_XML`) & Front-of-Queue LIFO Anchors**:
+   - Connects all `UNLINKED` nodes in `< 2 seconds` with **zero cloud LLM calls**, preserving 100% of node types verbatim and automatically splitting same-name entities with different types into non-colliding XML batches.
 
 ---
 
@@ -39,12 +38,12 @@ agentmemory-graph-linker/
 ├── install.sh                                     # One-command automated installer & maxReads patcher
 ├── skill/
 │   └── agentmemory-graph-linker/
-│       ├── SKILL.md                               # Skill instructions for Antigravity
-│       ├── REFERENCE.md                           # Deep-dive on maxReads: 4096, 4-layer KV delete & changelog
+│       ├── SKILL.md                               # Skill instructions for Antigravity (v2.2)
+│       ├── REFERENCE.md                           # Deep-dive on maxReads: 4096, 5-layer KV delete, log cursor & changelog
 │       └── scripts/
-│           └── graph-linker.mjs                   # Executable CLI (--status, --beautify, --delete, --heal, --dump, --apply, --auto)
+│           └── graph-linker.mjs                   # Executable CLI (--status, --beautify, --delete, --heal, --logs, --dump, --apply, --auto)
 └── router/
-    ├── smart-router.mjs                           # 11-tier Smart AI Router (reads keys from ~/.agentmemory/.env)
+    ├── smart-router.mjs                           # 11-tier Smart AI Router v2.2 (reads keys from ~/.agentmemory/.env)
     └── com.agentmemory.smartrouter.plist.example  # macOS LaunchAgent template
 ```
 
@@ -71,11 +70,14 @@ node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs -
 # Beautify & Balance Layout into 6 Thematic Constellations + Multi-Pass Sweep (Recommended)
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --beautify
 
-# Permanently delete unwanted nodes & incident edges across all 4 KV layers
+# Permanently delete unwanted nodes, incident edges & facets across all 5 KV layers
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --delete "Node Name 1" "gn_id_2"
 
-# One-shot health recovery: drain offline capture spool + verify index + rebuild snapshot
+# One-shot health recovery: delta log heal + drain spool + session sweep + verify index + rebuild snapshot
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --heal
+
+# Inspect & heal ONLY unread bytes from mcp-crash.log & daemon logs (0 tokens on unchanged files)
+node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --logs
 
 # Dump front anchors (0..24) & unlinked nodes as compact JSON for AI semantic curation
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --dump
@@ -108,12 +110,13 @@ SUMMARIZE_CHUNK_CONCURRENCY=1
 
 ## 📋 Changelog
 
+- **v2.2 (2026-11-05)**:
+  - **Zero-Token Incremental Log Inspector (`--logs` & integrated in `--heal`, #1662 / #1674)**: Connects to `~/.agentmemory/mcp-crash.log` (and `.1` / `$TMPDIR` fallback) plus daemon logs (`agentmemory.error.log`, `agentmemory.log`) using a persistent byte-offset & inode cursor (`~/.agentmemory/.log-heal-cursor.json`) so already-read and already-fixed log entries are skipped with `0 bytes` read.
+  - **Smart AI Router v2.2 (`router/smart-router.mjs`)**: Added **Truncated Reply Failover (#1495)** (`finish_reason === "length"` and unclosed `<summary>`/`<observation>`/`<entities>` XML detection) and **Surrogate-Safe UTF-16 Slicing (#1598)** (`sliceHeadSurrogateSafe`, `sliceTailSurrogateSafe`).
+  - **5-Layer `--delete` with Facet & Membership Cleanup (#1642)**: Purges orphaned `mem:facets`, `mem:graph:membership`, and `mem:graph:edge-history` entries when deleting nodes.
+  - **Enhanced `--heal` Resource Maintenance (#1256, #1260, #1645, #1664)**: Triggers `mem::session-sweep`, checks `mem:idx:bm25` `"legacy:sweep"`, queries bounded `mem::graph-stats`, and strips deprecated `OPENAI_API_KEY_FOR_LLM`.
 - **v2.1 (2026-11-05)**:
-  - Added self-healing in `--heal` and `install.sh` to automatically re-patch `maxReads: 4096` (`maxBytes: 8MB`) in `dist/index.mjs` after npm upgrades and ensure `AGENTMEMORY_LLM_PROVIDER=openai` in `~/.agentmemory/.env` for `@agentmemory/agentmemory` v0.9.32+ compatibility.
+  - Added self-healing in `--heal` and `install.sh` to automatically re-patch `maxReads: 4096` (`maxBytes: 8MB`) in `dist/index.mjs` after npm upgrades and ensure `AGENTMEMORY_LLM_PROVIDER=openai` in `~/.agentmemory/.env`.
   - Added automatic `POST /agentmemory/graph/index/resume` recovery in `--heal` when the retrieval index is `paused` after a daemon restart.
 - **v2.0 (2026-11-05)**:
-  - Added `--delete "<name_or_id>"` for 4-layer permanent deletion of nodes and incident edges via `iii` WebSocket (`ws://127.0.0.1:49134`).
-  - Added `--heal` / `--drain` for one-shot capture spool draining and index verification.
-  - Added Auto-Anchor Visibility Protection (`pageNodes[0..24]`) and Same-Name Entity Collision Batching in `--apply`.
-  - Added Multi-Pass Boundary Sweep in `--beautify`.
-
+  - Added `--delete "<name_or_id>"`, `--heal` / `--drain`, Auto-Anchor Visibility Protection (`pageNodes[0..24]`), Same-Name Entity Collision Batching, and Multi-Pass Boundary Sweep.
