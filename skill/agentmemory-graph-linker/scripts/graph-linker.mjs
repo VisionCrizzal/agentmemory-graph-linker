@@ -650,11 +650,29 @@ async function runHeal(secret) {
   });
   const drainData = drainRes.ok ? await drainRes.json() : { error: `HTTP ${drainRes.status}` };
 
-  const indexRes = await fetch(`${BASE_URL}/agentmemory/graph/index`, {
+  let indexRes = await fetch(`${BASE_URL}/agentmemory/graph/index`, {
     method: "GET",
     headers: { Authorization: `Bearer ${secret}` }
   });
-  const indexData = indexRes.ok ? await indexRes.json() : { error: `HTTP ${indexRes.status}` };
+  let indexData = indexRes.ok ? await indexRes.json() : { error: `HTTP ${indexRes.status}` };
+
+  // Auto-resume if retrieval index was paused by a daemon restart
+  if ((indexData.state === "paused" || indexData.control?.status === "paused") && !indexData.ready) {
+    await fetch(`${BASE_URL}/agentmemory/graph/index/resume`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${secret}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ allowLegacyScan: true })
+    }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 2000));
+    indexRes = await fetch(`${BASE_URL}/agentmemory/graph/index`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${secret}` }
+    });
+    indexData = indexRes.ok ? await indexRes.json() : indexData;
+  }
 
   await rebuildSnapshot(secret);
   const graphState = await queryGraph(secret);
