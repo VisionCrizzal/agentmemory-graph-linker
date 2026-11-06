@@ -1,8 +1,16 @@
 # AgentMemory Knowledge Graph Linker, Cleaner & Smart AI Router (v2.2)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Companion for AgentMemory](https://img.shields.io/badge/Companion%20For-rohitg00%2Fagentmemory-blue.svg)](https://github.com/rohitg00/agentmemory)
+
 🌐 **Language / Ngôn ngữ:** **🇬🇧 English** | [🇻🇳 Tiếng Việt](./README-VN.md)
 
-A lightweight **Antigravity Skill (`agentmemory-graph-linker`)** and **11-Tier Smart AI Router** that links isolated (`UNLINKED / NO RELATIONS YET`) nodes, permanently deletes unwanted nodes across all 5 KV storage layers (including `mem:facets`), drains offline capture spools, incrementally inspects & heals `mcp-crash.log` and daemon logs with a **0-token byte-offset cursor**, and balances thematic clusters in the `@agentmemory/agentmemory` Knowledge Graph (`http://localhost:3113/#graph`).
+> [!IMPORTANT]
+> **Prerequisite / Ecosystem Requirement:**
+> This toolkit is an essential companion skill specifically designed for **[AgentMemory (`rohitg00/agentmemory`)](https://github.com/rohitg00/agentmemory)**.
+> It operates directly with the `@agentmemory/agentmemory` daemon, `iii-sdk` WebSocket (`ws://127.0.0.1:49134`), and Knowledge Graph endpoints (`http://localhost:3113/#graph`). You must have [AgentMemory](https://github.com/rohitg00/agentmemory) installed and running to use this skill.
+
+A lightweight **Antigravity Skill (`agentmemory-graph-linker`)** and **11-Tier Smart AI Router** that links isolated (`UNLINKED / NO RELATIONS YET`) nodes, permanently deletes unwanted nodes across all 5 KV storage layers (including `mem:facets`), drains offline capture spools, incrementally inspects & heals `mcp-crash.log` and daemon logs with a **0-token byte-offset cursor**, and balances thematic clusters in the [AgentMemory](https://github.com/rohitg00/agentmemory) Knowledge Graph (`http://localhost:3113/#graph`).
 
 ---
 
@@ -33,6 +41,7 @@ A lightweight **Antigravity Skill (`agentmemory-graph-linker`)** and **11-Tier S
 
 ```text
 agentmemory-graph-linker/
+├── LICENSE                                        # MIT License
 ├── README.md                                      # English Documentation (Default)
 ├── README-VN.md                                   # Vietnamese Documentation (Tiếng Việt)
 ├── install.sh                                     # One-command automated installer & maxReads patcher
@@ -91,7 +100,7 @@ node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs -
 
 ### 2. Configure API Keys for Smart Router (`~/.agentmemory/.env`)
 
-Compatible with `@agentmemory/agentmemory` v0.9.32+ (which requires explicit `AGENTMEMORY_LLM_PROVIDER`):
+Compatible with [`@agentmemory/agentmemory`](https://github.com/rohitg00/agentmemory) v0.9.32+ (which requires explicit `AGENTMEMORY_LLM_PROVIDER`):
 
 ```dotenv
 AGENTMEMORY_LLM_PROVIDER=openai
@@ -105,6 +114,13 @@ FALLBACK_PROVIDERS=gemini
 SUMMARIZE_CHUNK_SIZE=5000
 SUMMARIZE_CHUNK_CONCURRENCY=1
 ```
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](./LICENSE) - see the [LICENSE](./LICENSE) file for details.
+Designed as a companion skill for [AgentMemory (`rohitg00/agentmemory`)](https://github.com/rohitg00/agentmemory).
 
 ---
 

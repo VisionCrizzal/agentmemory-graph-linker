@@ -1,8 +1,16 @@
 # AgentMemory Knowledge Graph Linker, Cleaner & Smart AI Router (v2.2)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Companion for AgentMemory](https://img.shields.io/badge/Companion%20For-rohitg00%2Fagentmemory-blue.svg)](https://github.com/rohitg00/agentmemory)
+
 🌐 **Language / Ngôn ngữ:** [🇬🇧 English](./README.md) | **🇻🇳 Tiếng Việt**
 
-Bộ công cụ và **Antigravity Skill (`agentmemory-graph-linker`)** kèm **Smart AI Router 11 tầng (v2.2)** giúp tự động nối các node rời rạc (`UNLINKED / NO RELATIONS YET`), xóa vĩnh viễn các node rác trên cả 5 tầng lưu trữ KV (bao gồm `mem:facets`), xả hàng đợi offline spool, đọc & tự sửa lỗi từ `mcp-crash.log` / daemon log bằng **con trỏ byte-offset tiết kiệm 100% token cho các dòng đã đọc**, và phân bổ đồ thị tri thức của `@agentmemory/agentmemory` (`http://localhost:3113/#graph`).
+> [!IMPORTANT]
+> **Yêu cầu hệ sinh thái / Điều kiện tiên quyết:**
+> Bộ công cụ này là skill bổ trợ thiết yếu được thiết kế đặc thù cho dự án mã nguồn mở **[AgentMemory (`rohitg00/agentmemory`)](https://github.com/rohitg00/agentmemory)**.
+> Skill tương tác trực tiếp với daemon của `@agentmemory/agentmemory`, kết nối WebSocket qua `iii-sdk` (`ws://127.0.0.1:49134`), và giao diện đồ thị tri thức (`http://localhost:3113/#graph`). Máy bạn cần cài đặt và chạy [AgentMemory](https://github.com/rohitg00/agentmemory) để sử dụng toàn bộ tính năng.
+
+Bộ công cụ và **Antigravity Skill (`agentmemory-graph-linker`)** kèm **Smart AI Router 11 tầng (v2.2)** giúp tự động nối các node rời rạc (`UNLINKED / NO RELATIONS YET`), xóa vĩnh viễn các node rác trên cả 5 tầng lưu trữ KV (bao gồm `mem:facets`), xả hàng đợi offline spool, đọc & tự sửa lỗi từ `mcp-crash.log` / daemon log bằng **con trỏ byte-offset tiết kiệm 100% token cho các dòng đã đọc**, và phân bổ đồ thị tri thức của [AgentMemory](https://github.com/rohitg00/agentmemory) (`http://localhost:3113/#graph`).
 
 ---
 
@@ -33,6 +41,7 @@ Bộ công cụ và **Antigravity Skill (`agentmemory-graph-linker`)** kèm **Sm
 
 ```text
 agentmemory-graph-linker/
+├── LICENSE                                        # Giấy phép mã nguồn mở MIT
 ├── README.md                                      # Tài liệu hướng dẫn tiếng Anh (Mặc định)
 ├── README-VN.md                                   # Tài liệu hướng dẫn tiếng Việt
 ├── install.sh                                     # Script cài đặt tự động 1 lệnh & vá maxReads: 4096
@@ -91,7 +100,7 @@ node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs -
 
 ### 2. Cấu hình API Key cho Smart Router (trong `~/.agentmemory/.env`)
 
-Tương thích chuẩn với `@agentmemory/agentmemory` v0.9.32+ (yêu cầu khai báo tường minh `AGENTMEMORY_LLM_PROVIDER`):
+Tương thích chuẩn với [`@agentmemory/agentmemory`](https://github.com/rohitg00/agentmemory) v0.9.32+ (yêu cầu khai báo tường minh `AGENTMEMORY_LLM_PROVIDER`):
 
 ```dotenv
 AGENTMEMORY_LLM_PROVIDER=openai
@@ -105,6 +114,13 @@ FALLBACK_PROVIDERS=gemini
 SUMMARIZE_CHUNK_SIZE=5000
 SUMMARIZE_CHUNK_CONCURRENCY=1
 ```
+
+---
+
+## 📄 Bản quyền (License)
+
+Dự án được phân phối dưới giấy phép mã nguồn mở [MIT License](./LICENSE) - xem chi tiết tại file [LICENSE](./LICENSE).
+Được thiết kế làm công cụ bổ trợ cho [AgentMemory (`rohitg00/agentmemory`)](https://github.com/rohitg00/agentmemory).
 
 ---
 

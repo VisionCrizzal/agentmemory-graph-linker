@@ -6,7 +6,10 @@ user-invocable: true
 
 # AgentMemory Knowledge Graph Linker, Cleaner & Healer (v2.2)
 
-Links isolated nodes (`NO RELATIONS YET`), permanently deletes unwanted nodes across all 5 storage layers (including `mem:facets`), drains offline capture spools, incrementally inspects & heals `mcp-crash.log` / daemon logs without re-reading fixed lines, and balances thematic clusters in the AgentMemory Knowledge Graph (`http://localhost:3113/#graph`) without burning frontier LLM tokens.
+> **Companion Skill for [AgentMemory (`rohitg00/agentmemory`)](https://github.com/rohitg00/agentmemory)**  
+> Requires [`@agentmemory/agentmemory`](https://github.com/rohitg00/agentmemory) daemon and `iii` engine running locally. Distributed under the [MIT License](./LICENSE).
+
+Links isolated nodes (`NO RELATIONS YET`), permanently deletes unwanted nodes across all 5 storage layers (including `mem:facets`), drains offline capture spools, incrementally inspects & heals `mcp-crash.log` / daemon logs without re-reading fixed lines, and balances thematic clusters in the [AgentMemory](https://github.com/rohitg00/agentmemory) Knowledge Graph (`http://localhost:3113/#graph`) without burning frontier LLM tokens.
 
 ## Quick start
 
