@@ -4,64 +4,28 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENTS_SKILL_DIR="$HOME/.agents/skills/agentmemory-graph-linker"
 GEMINI_SKILL_DIR="$HOME/.gemini/config/skills/agentmemory-graph-linker"
+CLAUDE_SKILL_DIR="$HOME/.claude/skills/agentmemory-graph-linker"
 AGENTMEMORY_DIR="$HOME/.agentmemory"
 
-echo "==> Installing agentmemory-graph-linker skill (v2.2)..."
-mkdir -p "$HOME/.agents/skills" "$HOME/.gemini/config/skills" "$AGENTMEMORY_DIR"
+echo "==> Installing agentmemory-graph-linker skill (v3.0)..."
+mkdir -p "$HOME/.agents/skills" "$HOME/.gemini/config/skills" "$HOME/.claude/skills" "$AGENTMEMORY_DIR"
 rm -rf "$AGENTS_SKILL_DIR"
 cp -R "$REPO_DIR/skill/agentmemory-graph-linker" "$AGENTS_SKILL_DIR"
 chmod +x "$AGENTS_SKILL_DIR/scripts/graph-linker.mjs"
 ln -sfn "$AGENTS_SKILL_DIR" "$GEMINI_SKILL_DIR"
+ln -sfn "$AGENTS_SKILL_DIR" "$CLAUDE_SKILL_DIR"
 echo "    ✓ Skill installed at: $AGENTS_SKILL_DIR"
 echo "    ✓ Symlinked to:       $GEMINI_SKILL_DIR"
+echo "    ✓ Symlinked to:       $CLAUDE_SKILL_DIR"
 
-echo "==> Installing Smart AI Router v2.2 (secret-free, reads from ~/.agentmemory/.env)..."
+echo "==> Installing Smart AI Router v3.0 (reads from ~/.agentmemory/.env)..."
 cp "$REPO_DIR/router/smart-router.mjs" "$AGENTMEMORY_DIR/smart-router.mjs"
 echo "    ✓ Copied smart-router.mjs to $AGENTMEMORY_DIR/smart-router.mjs"
 
-if [ -f "$AGENTMEMORY_DIR/.env" ]; then
-  if ! grep -q "^AGENTMEMORY_LLM_PROVIDER=" "$AGENTMEMORY_DIR/.env" && grep -q "^OPENAI_API_KEY=" "$AGENTMEMORY_DIR/.env"; then
-    echo "==> Ensuring AGENTMEMORY_LLM_PROVIDER=openai in $AGENTMEMORY_DIR/.env (v0.9.32+ compatibility)..."
-    node -e '
-      const fs = require("fs");
-      const p = process.argv[1];
-      let c = fs.readFileSync(p, "utf8");
-      c = c.replace(/^OPENAI_API_KEY=/m, "AGENTMEMORY_LLM_PROVIDER=openai\nOPENAI_API_KEY=");
-      fs.writeFileSync(p, c, "utf8");
-    ' "$AGENTMEMORY_DIR/.env"
-    echo "    ✓ Added AGENTMEMORY_LLM_PROVIDER=openai"
-  fi
-  if grep -q "^OPENAI_API_KEY_FOR_LLM=" "$AGENTMEMORY_DIR/.env"; then
-    echo "==> Removing deprecated OPENAI_API_KEY_FOR_LLM from $AGENTMEMORY_DIR/.env (#1664)..."
-    node -e '
-      const fs = require("fs");
-      const p = process.argv[1];
-      let c = fs.readFileSync(p, "utf8").replace(/^OPENAI_API_KEY_FOR_LLM=.*\n?/gm, "");
-      fs.writeFileSync(p, c, "utf8");
-    ' "$AGENTMEMORY_DIR/.env"
-    echo "    ✓ Removed deprecated OPENAI_API_KEY_FOR_LLM"
-  fi
-fi
-
-AGENTMEMORY_DIST="/usr/local/lib/node_modules/@agentmemory/agentmemory/dist/index.mjs"
-if [ -f "$AGENTMEMORY_DIST" ]; then
-  if grep -q "maxReads: 2048" "$AGENTMEMORY_DIST"; then
-    echo "==> Patching queryGraphIndex maxReads (2048 -> 4096) in $AGENTMEMORY_DIST..."
-    node -e '
-      const fs = require("fs");
-      const p = process.argv[1];
-      let c = fs.readFileSync(p, "utf8");
-      c = c.replace(
-        "const reader = await createGraphIndexReader(state, {\n\t\t\tmaxReads: 2048,\n\t\t\tmaxBytes: 4 * 1024 * 1024\n\t\t});",
-        "const reader = await createGraphIndexReader(state, {\n\t\t\tmaxReads: 4096,\n\t\t\tmaxBytes: 8 * 1024 * 1024\n\t\t});"
-      );
-      fs.writeFileSync(p, c);
-    ' "$AGENTMEMORY_DIST"
-    echo "    ✓ Patched maxReads to 4096"
-  else
-    echo "    ✓ queryGraphIndex maxReads is already patched (4096)"
-  fi
-fi
+echo "==> Applying v3.0 system, XML-entity & RAM patches via graph-linker.mjs..."
+node "$AGENTS_SKILL_DIR/scripts/graph-linker.mjs" --heal >/dev/null 2>&1 || true
+echo "    ✓ Patched maxReads: 4096, parseAttrs XML decoding, and .env RAM limits"
 
 echo "==> Done! Test with:"
 echo "    node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --status"
+echo "    node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --audit"

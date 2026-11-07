@@ -4,11 +4,92 @@ import path from "node:path";
 import os from "node:os";
 
 /**
- * AgentMemory 11-Tier Fault-Tolerant Smart AI Router (v2.2)
+ * AgentMemory 11-Tier Fault-Tolerant Smart AI Router (v3.0)
  * - Surrogate-safe UTF-16 prompt & fallback slicing (#1598)
  * - Truncated reply (finish_reason === "length" / unclosed XML) detection & automatic tier failover (#1495)
+ * - Zero-Token Hallucination & Scratch Noise Gate on <entities> XML
+ * - Nested XML entity unescaping so &amp;quot; / &amp;lt; phantoms never enter the graph
  * - Instant Zero-Token DIRECT_GRAPH_XML passthrough (<1ms)
  */
+
+const HALLUCINATION_ENTITY_REGEX =
+  /\b(invasion\s+german|german\s+invasion|third\s+reich|adolf\s+hitler|nazi\s+party|world\s+war\s+ii|holocaust|soviet\s+invasion|roman\s+empire|medieval\s+europe)\b/i;
+
+function isNoisyScratchEntityName(name) {
+  const nm = String(name || "").trim();
+  if (!nm) return true;
+  if (
+    nm.includes("/.system_generated/tasks/") ||
+    nm.includes("/.system_generated/steps/") ||
+    nm.includes("/.user_uploaded/media_") ||
+    nm.startsWith("/tmp/") ||
+    nm.startsWith("/private/tmp/") ||
+    nm.includes("/var/folders/") ||
+    /^0x[0-9a-f]{8,}$/i.test(nm)
+  ) {
+    return true;
+  }
+  return HALLUCINATION_ENTITY_REGEX.test(nm);
+}
+
+function unescapeNestedXmlAttr(val) {
+  let s = String(val || "");
+  for (let i = 0; i < 8; i++) {
+    const next = s
+      .replace(/&quot;/gi, '"')
+      .replace(/&apos;/gi, "'")
+      .replace(/&gt;/gi, ">")
+      .replace(/&lt;/gi, "<")
+      .replace(/&amp;/gi, "&");
+    if (next === s) break;
+    s = next;
+  }
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function sanitizeGraphXmlOutput(xml) {
+  const blockedNames = new Set();
+  // Clean <entity .../> tags and filter out scratch/hallucination entities
+  let cleaned = xml.replace(/<entity\b([^>]*?)\/>/gi, (full, attrs) => {
+    const nameMatch = /\bname="([^"]*)"/i.exec(attrs);
+    if (!nameMatch) return full;
+    const cleanAttrName = unescapeNestedXmlAttr(nameMatch[1]);
+    if (isNoisyScratchEntityName(cleanAttrName)) {
+      blockedNames.add(nameMatch[1]);
+      blockedNames.add(cleanAttrName);
+      return "";
+    }
+    return full.replace(/\bname="([^"]*)"/i, `name="${cleanAttrName}"`);
+  });
+
+  // Clean <relationship .../> tags and drop relationships referencing blocked entities
+  cleaned = cleaned.replace(/<relationship\b([^>]*?)\/>/gi, (full, attrs) => {
+    const sMatch = /\bsource="([^"]*)"/i.exec(attrs);
+    const tMatch = /\btarget="([^"]*)"/i.exec(attrs);
+    if (!sMatch || !tMatch) return full;
+    const sClean = unescapeNestedXmlAttr(sMatch[1]);
+    const tClean = unescapeNestedXmlAttr(tMatch[1]);
+    if (
+      blockedNames.has(sMatch[1]) ||
+      blockedNames.has(sClean) ||
+      blockedNames.has(tMatch[1]) ||
+      blockedNames.has(tClean) ||
+      isNoisyScratchEntityName(sClean) ||
+      isNoisyScratchEntityName(tClean)
+    ) {
+      return "";
+    }
+    return full
+      .replace(/\bsource="([^"]*)"/i, `source="${sClean}"`)
+      .replace(/\btarget="([^"]*)"/i, `target="${tClean}"`);
+  });
+
+  return cleaned;
+}
 
 function loadEnvFile() {
   const envPath = path.join(os.homedir(), ".agentmemory", ".env");
@@ -38,7 +119,7 @@ const TARGETS = [
     name: "Groq (GPT-OSS 20B - Super Fast & High Quota)",
     url: "https://api.groq.com/openai/v1/chat/completions",
     headers: {
-      "Authorization": `Bearer ${GROQ_KEY}`,
+      Authorization: `Bearer ${GROQ_KEY}`,
       "Content-Type": "application/json"
     },
     model: "openai/gpt-oss-20b",
@@ -48,7 +129,7 @@ const TARGETS = [
     name: "Groq (Qwen 3.8 27B - Multilingual)",
     url: "https://api.groq.com/openai/v1/chat/completions",
     headers: {
-      "Authorization": `Bearer ${GROQ_KEY}`,
+      Authorization: `Bearer ${GROQ_KEY}`,
       "Content-Type": "application/json"
     },
     model: "qwen/qwen3.8-27b",
@@ -58,7 +139,7 @@ const TARGETS = [
     name: "Groq (GPT-OSS 120B - Deep Reasoning)",
     url: "https://api.groq.com/openai/v1/chat/completions",
     headers: {
-      "Authorization": `Bearer ${GROQ_KEY}`,
+      Authorization: `Bearer ${GROQ_KEY}`,
       "Content-Type": "application/json"
     },
     model: "openai/gpt-oss-120b",
@@ -68,7 +149,7 @@ const TARGETS = [
     name: "Gemini Flash Lite (Google AI Studio - Fast Quota)",
     url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
     headers: {
-      "Authorization": `Bearer ${GEMINI_KEY}`,
+      Authorization: `Bearer ${GEMINI_KEY}`,
       "Content-Type": "application/json"
     },
     model: "gemini-flash-lite-latest",
@@ -78,7 +159,7 @@ const TARGETS = [
     name: "Gemini 2.5 Flash (Google AI Studio - Stable)",
     url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
     headers: {
-      "Authorization": `Bearer ${GEMINI_KEY}`,
+      Authorization: `Bearer ${GEMINI_KEY}`,
       "Content-Type": "application/json"
     },
     model: "gemini-2.5-flash",
@@ -88,7 +169,7 @@ const TARGETS = [
     name: "Gemma 4 26B MoE (Google High-Quota Fast Pool)",
     url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
     headers: {
-      "Authorization": `Bearer ${GEMINI_KEY}`,
+      Authorization: `Bearer ${GEMINI_KEY}`,
       "Content-Type": "application/json"
     },
     model: "gemma-4-26b-a4b-it",
@@ -98,7 +179,7 @@ const TARGETS = [
     name: "Gemini 3.8 Flash (Google AI Studio)",
     url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
     headers: {
-      "Authorization": `Bearer ${GEMINI_KEY}`,
+      Authorization: `Bearer ${GEMINI_KEY}`,
       "Content-Type": "application/json"
     },
     model: "gemini-3.8-flash",
@@ -124,7 +205,6 @@ const TARGETS = [
   }
 ];
 
-// Cooldown tracker so rate-limited or offline targets are skipped in 0ms
 const cooldownUntil = new Map();
 
 function isCoolingDown(target) {
@@ -133,20 +213,22 @@ function isCoolingDown(target) {
 }
 
 function markCooldown(target, status, errText = "") {
-  let ms = 45000; // default 45s cooldown for per-minute rate limits or offline local nodes
+  let ms = 45000;
   if (status === 429 && (errText.includes("tokens per day") || errText.includes("PerDay"))) {
-    ms = 10 * 60 * 1000; // 10 min cooldown for daily quota exhaustion
+    ms = 10 * 60 * 1000;
   } else if (status === 499) {
-    ms = 15 * 1000; // 15s cooldown when a model hits max_tokens truncation (#1495)
-  } else if (target.url.includes("127.0.0.1:8080") || target.url.includes("192.168.1.231:8080")) {
-    ms = 120 * 1000; // 2 min cooldown when Z Fold 3 is unplugged/offline
+    ms = 15 * 1000;
+  } else if (
+    target.url.includes("127.0.0.1:8080") ||
+    target.url.includes("192.168.1.231:8080")
+  ) {
+    ms = 120 * 1000;
   }
   cooldownUntil.set(target.name, Date.now() + ms);
 }
 
 /**
  * Surrogate-safe UTF-16 string slicing (#1598)
- * Prevents splitting high/low surrogate pairs (emojis, CJK, mathematical symbols)
  */
 function sliceHeadSurrogateSafe(str, maxLen) {
   if (typeof str !== "string" || str.length <= maxLen) return str;
@@ -171,7 +253,7 @@ function sliceTailSurrogateSafe(str, maxLen) {
 function sanitizeForTarget(payload) {
   if (!payload || !Array.isArray(payload.messages)) return payload;
 
-  const MAX_TOTAL_CHARS = 12000; // ~3000 tokens, fast and safe for all providers (Groq, Gemini, Gemma 4)
+  const MAX_TOTAL_CHARS = 12000;
   const totalChars = payload.messages.reduce(
     (sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0),
     0
@@ -197,8 +279,7 @@ function escapeXmlBareAmpersands(xml) {
 }
 
 /**
- * Cleans LLM output and detects truncated replies (#1495).
- * Returns { ok: boolean, data?: string, reason?: string }
+ * Cleans LLM output, strips hallucinations/scratch noise, and detects truncated replies (#1495).
  */
 function inspectAndCleanResponse(rawText, expectedFormat = "any") {
   try {
@@ -211,12 +292,13 @@ function inspectAndCleanResponse(rawText, expectedFormat = "any") {
       const finishReason = c?.finish_reason;
       const rawContent = typeof c?.message?.content === "string" ? c.message.content : "";
 
-      // Strip thought / think tags (including unclosed blocks)
       let text = rawContent
-        .replace(/<(?:thought|think)>[\s\S]*?(?:<\/(?:thought|think)>|(?=<(?:summary|observation|entities)>))/gi, "")
+        .replace(
+          /<(?:thought|think)>[\s\S]*?(?:<\/(?:thought|think)>|(?=<(?:summary|observation|entities)>))/gi,
+          ""
+        )
         .trim();
 
-      // #1495: Reject responses cut off at max_tokens before finishing content
       if (finishReason === "length") {
         const hasCompleteSummary = /<summary>[\s\S]*?<\/summary>/i.test(text);
         const hasCompleteObs = /<observation>[\s\S]*?<\/observation>/i.test(text);
@@ -230,18 +312,28 @@ function inspectAndCleanResponse(rawText, expectedFormat = "any") {
         return { ok: false, reason: "empty_content_after_think_strip" };
       }
 
-      // Check for truncated XML when specific XML structure is expected (#1495)
-      if (expectedFormat === "summary" && text.includes("<summary>") && !/<\/summary>/i.test(text)) {
+      if (
+        expectedFormat === "summary" &&
+        text.includes("<summary>") &&
+        !/<\/summary>/i.test(text)
+      ) {
         return { ok: false, reason: "unclosed_summary_xml" };
       }
-      if (expectedFormat === "observation" && text.includes("<observation>") && !/<\/observation>/i.test(text)) {
+      if (
+        expectedFormat === "observation" &&
+        text.includes("<observation>") &&
+        !/<\/observation>/i.test(text)
+      ) {
         return { ok: false, reason: "unclosed_observation_xml" };
       }
-      if (expectedFormat === "graph" && text.includes("<entities>") && !/<\/relationships>/i.test(text)) {
+      if (
+        expectedFormat === "graph" &&
+        text.includes("<entities>") &&
+        !/<\/relationships>/i.test(text)
+      ) {
         return { ok: false, reason: "unclosed_graph_xml" };
       }
 
-      // Extract exact target XML if wrapped in markdown or conversational chatter
       if (text.includes("<summary>")) {
         const m = text.match(/<summary>[\s\S]*?<\/summary>/i);
         if (m) text = m[0];
@@ -253,7 +345,7 @@ function inspectAndCleanResponse(rawText, expectedFormat = "any") {
       } else if (text.includes("<entities>")) {
         const m = text.match(/<entities>[\s\S]*?<\/relationships>/i);
         if (m) text = m[0];
-        text = escapeXmlBareAmpersands(text);
+        text = sanitizeGraphXmlOutput(escapeXmlBareAmpersands(text));
       }
 
       c.message.content = text.trim();
@@ -277,43 +369,68 @@ function escapeXml(str) {
     .trim();
 }
 
-// Target #11: Instant Local Extractive Fallback (0% GPU, <1ms) so AgentMemory NEVER fails or pauses!
 function buildLocalExtractiveFallback(parsed) {
   const messages = Array.isArray(parsed?.messages) ? parsed.messages : [];
   const systemMsg = messages.find((m) => m.role === "system")?.content || "";
-  const userMsg = messages.filter((m) => m.role === "user").map((m) => m.content).join("\n") || "";
+  const userMsg =
+    messages
+      .filter((m) => m.role === "user")
+      .map((m) => m.content)
+      .join("\n") || "";
 
   let content = "";
 
-  if (systemMsg.includes("<summary>") || systemMsg.includes("session summarizer") || systemMsg.includes("merging multiple partial summaries")) {
+  if (
+    systemMsg.includes("<summary>") ||
+    systemMsg.includes("session summarizer") ||
+    systemMsg.includes("merging multiple partial summaries")
+  ) {
     const titles = [];
     for (const m of userMsg.matchAll(/(?:\[\d+\]\s+[a-z_]+:\s+|Title:\s+)([^\n]+)/gi)) {
       const t = m[1].trim();
       if (t && t.length > 3 && !titles.includes(t)) titles.push(t);
     }
     const files = [];
-    for (const m of userMsg.matchAll(/(?:Files:\s*|-\s*)(\/[^\s,\n]+|[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_./-]+\.[a-zA-Z0-9]+)/g)) {
+    for (const m of userMsg.matchAll(
+      /(?:Files:\s*|-\s*)(\/[^\s,\n]+|[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_./-]+\.[a-zA-Z0-9]+)/g
+    )) {
       const f = m[1].trim();
-      if (f && !files.includes(f)) files.push(f);
+      if (f && !files.includes(f) && !isNoisyScratchEntityName(f)) files.push(f);
     }
     const concepts = [];
     for (const m of userMsg.matchAll(/Concepts:\s*([^\n]+)/gi)) {
       for (const c of m[1].split(",")) {
         const clean = c.trim();
-        if (clean && !concepts.includes(clean)) concepts.push(clean);
+        if (clean && !concepts.includes(clean) && !isNoisyScratchEntityName(clean))
+          concepts.push(clean);
       }
     }
 
-    const mainTitle = sliceHeadSurrogateSafe(titles[titles.length - 1] || titles[0] || "Coding & System Optimization Session", 95);
-    const sampleTitles = titles.slice(-6).join("; ") || "Executed project tasks, diagnostics, and configuration updates";
-    const narrative = `Completed session activities across ${titles.length || 1} key milestones: ${sampleTitles}. All observations and state changes were captured and indexed in AgentMemory.`;
-    const decisionList = (titles.slice(0, 4).length ? titles.slice(0, 4) : ["Completed automated session state verification and memory indexing"])
+    const mainTitle = sliceHeadSurrogateSafe(
+      titles[titles.length - 1] || titles[0] || "Coding & System Optimization Session",
+      95
+    );
+    const sampleTitles =
+      titles.slice(-6).join("; ") ||
+      "Executed project tasks, diagnostics, and configuration updates";
+    const narrative = `Completed session activities across ${
+      titles.length || 1
+    } key milestones: ${sampleTitles}. All observations and state changes were captured and indexed in AgentMemory.`;
+    const decisionList = (
+      titles.slice(0, 4).length
+        ? titles.slice(0, 4)
+        : ["Completed automated session state verification and memory indexing"]
+    )
       .map((d) => `    <decision>${escapeXml(sliceHeadSurrogateSafe(d, 140))}</decision>`)
       .join("\n");
     const fileList = (files.slice(0, 12).length ? files.slice(0, 12) : ["~/.agentmemory/.env"])
       .map((f) => `    <file>${escapeXml(f)}</file>`)
       .join("\n");
-    const conceptList = (concepts.slice(0, 8).length ? concepts.slice(0, 8) : ["session-summary", "agentmemory", "system-configuration"])
+    const conceptList = (
+      concepts.slice(0, 8).length
+        ? concepts.slice(0, 8)
+        : ["session-summary", "agentmemory", "system-configuration"]
+    )
       .map((c) => `    <concept>${escapeXml(c)}</concept>`)
       .join("\n");
 
@@ -333,7 +450,11 @@ ${conceptList}
   } else if (systemMsg.includes("<observation>")) {
     const toolMatch = /Tool:\s*([^\n]+)/i.exec(userMsg);
     const hookMatch = /Hook:\s*([^\n]+)/i.exec(userMsg);
-    const toolName = toolMatch ? toolMatch[1].trim() : hookMatch ? hookMatch[1].trim() : "operation";
+    const toolName = toolMatch
+      ? toolMatch[1].trim()
+      : hookMatch
+      ? hookMatch[1].trim()
+      : "operation";
     let obsType = "other";
     if (/read|view/i.test(toolName)) obsType = "file_read";
     else if (/write|create/i.test(toolName)) obsType = "file_write";
@@ -342,12 +463,22 @@ ${conceptList}
     else if (/search|grep|find/i.test(toolName)) obsType = "search";
     else if (/prompt/i.test(toolName)) obsType = "conversation";
 
-    const firstLine = userMsg
-      .split("\n")
-      .map((l) => l.trim())
-      .find((l) => l.length > 15 && !l.startsWith("Timestamp:") && !l.startsWith("Hook:") && !l.startsWith("Tool:")) || `Executed ${toolName}`;
+    const firstLine =
+      userMsg
+        .split("\n")
+        .map((l) => l.trim())
+        .find(
+          (l) =>
+            l.length > 15 &&
+            !l.startsWith("Timestamp:") &&
+            !l.startsWith("Hook:") &&
+            !l.startsWith("Tool:")
+        ) || `Executed ${toolName}`;
     const title = sliceHeadSurrogateSafe(`${toolName}: ${firstLine}`, 75);
-    const narrative = `Executed ${toolName} during coding session (${sliceHeadSurrogateSafe(firstLine, 120)}). Output was captured and indexed for session memory retrieval.`;
+    const narrative = `Executed ${toolName} during coding session (${sliceHeadSurrogateSafe(
+      firstLine,
+      120
+    )}). Output was captured and indexed for session memory retrieval.`;
 
     content = `<observation>
   <type>${obsType}</type>
@@ -363,7 +494,7 @@ ${conceptList}
     <concept>agent-workflow</concept>
   </concepts>
   <files>
-    <file>workspace</file>
+    <file>~/.agentmemory/.env</file>
   </files>
   <importance>5</importance>
 </observation>`;
@@ -400,10 +531,12 @@ const server = http.createServer(async (req, res) => {
     res.end(
       JSON.stringify({
         status: "ok",
-        version: "2.2",
+        version: "3.0",
         features: [
           "surrogate-safe-truncation (#1598)",
           "max_tokens-truncated-reply-failover (#1495)",
+          "zero-token-hallucination-and-scratch-noise-gate",
+          "nested-xml-entity-unescaping",
           "direct-graph-xml-zero-token-passthrough"
         ],
         chain: [...TARGETS.map((t) => t.name), "Local Extractive Fallback (Zero-Fail Safety Net)"]
@@ -426,7 +559,6 @@ const server = http.createServer(async (req, res) => {
 
   const sanitized = sanitizeForTarget(parsed);
 
-  // Instant Zero-Token Passthrough for Direct Graph Linking (<entities>...<relationships>...)
   const messages = Array.isArray(parsed?.messages) ? parsed.messages : [];
   const systemMsg = messages.find((m) => m.role === "system")?.content || "";
   const allUserText = messages
@@ -434,10 +566,20 @@ const server = http.createServer(async (req, res) => {
     .map((m) => m.content || "")
     .join("\n");
 
-  const isSummarize = systemMsg.includes("<summary>") || systemMsg.includes("session summarizer") || systemMsg.includes("merging multiple partial summaries");
+  const isSummarize =
+    systemMsg.includes("<summary>") ||
+    systemMsg.includes("session summarizer") ||
+    systemMsg.includes("merging multiple partial summaries");
   const isObservation = systemMsg.includes("<observation>");
-  const isGraphExtraction = systemMsg.includes("knowledge graph extraction") || systemMsg.includes("<entities>");
-  const expectedFormat = isSummarize ? "summary" : isObservation ? "observation" : isGraphExtraction ? "graph" : "any";
+  const isGraphExtraction =
+    systemMsg.includes("knowledge graph extraction") || systemMsg.includes("<entities>");
+  const expectedFormat = isSummarize
+    ? "summary"
+    : isObservation
+    ? "observation"
+    : isGraphExtraction
+    ? "graph"
+    : "any";
 
   if (!isSummarize && isGraphExtraction && allUserText.includes("DIRECT_GRAPH_XML")) {
     const xmlMatch = allUserText.match(/<entities>[\s\S]*?<\/relationships>/);
@@ -486,26 +628,36 @@ const server = http.createServer(async (req, res) => {
           res.end(inspected.data);
           return;
         }
-        // #1495: Truncated or malformed reply -> fail over to next tier instead of storing broken data
         markCooldown(target, 499, inspected.reason);
-        console.log(`[Router] ${target.name} rejected (${inspected.reason}) -> failing over to next tier...`);
+        console.log(
+          `[Router] ${target.name} rejected (${inspected.reason}) -> failing over to next tier...`
+        );
         continue;
       }
       const errText = await response.text();
       markCooldown(target, response.status, errText);
-      console.log(`[Router] ${target.name} returned ${response.status} (cooling down): ${sliceHeadSurrogateSafe(errText, 140)}`);
+      console.log(
+        `[Router] ${target.name} returned ${response.status} (cooling down): ${sliceHeadSurrogateSafe(
+          errText,
+          140
+        )}`
+      );
     } catch (err) {
       markCooldown(target, 0, err.message);
-      console.log(`[Router] ${target.name} unreachable (${err.message}), cooling down & falling back...`);
+      console.log(
+        `[Router] ${target.name} unreachable (${err.message}), cooling down & falling back...`
+      );
     }
   }
 
-  console.log("[Router] All remote/local LLM targets cooling down -> using Zero-Fail Local Extractive Fallback!");
+  console.log(
+    "[Router] All remote/local LLM targets cooling down -> using Zero-Fail Local Extractive Fallback!"
+  );
   const fallbackData = buildLocalExtractiveFallback(sanitized);
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(fallbackData);
 });
 
 server.listen(PORT, "127.0.0.1", () => {
-  console.log(`Smart AI Router v2.2 listening on http://127.0.0.1:${PORT}`);
+  console.log(`Smart AI Router v3.0 listening on http://127.0.0.1:${PORT}`);
 });

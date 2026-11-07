@@ -1,15 +1,15 @@
 ---
 name: agentmemory-graph-linker
-description: Links unlinked nodes (NO RELATIONS YET), permanently deletes unwanted nodes/edges across all 5 KV layers (including facets), drains offline capture spools, inspects/heals mcp-crash.log & daemon logs with a 0-token byte-offset cursor, and beautifies layout in the AgentMemory Knowledge Graph while respecting the 4096 KV read budget. Use when the user asks to link unlinked graph nodes, delete specific graph nodes, inspect crash/daemon logs, fix a "Sparse graph" or spool warning on localhost:3113, or organize knowledge graph relations semantically.
+description: Links unlinked nodes (NO RELATIONS YET), audits & filters 0-token hallucinations, deduplicates errors & XML-escaped clones across all 5 KV layers, renames nodes atomically, safely prunes transient noise into Cold Graveyard (graveyard.jsonl) with lossless --restore, optimizes iii-engine RAM, inspects/heals mcp-crash.log & daemon logs with a 0-token byte-offset cursor, and beautifies layout in the AgentMemory Knowledge Graph while respecting the 4096 KV read budget.
 user-invocable: true
 ---
 
-# AgentMemory Knowledge Graph Linker, Cleaner & Healer (v2.2)
+# AgentMemory Knowledge Graph Linker, Deduplicator, Cleaner & RAM Optimizer (v3.0)
 
 > **Companion Skill for [AgentMemory (`rohitg00/agentmemory`)](https://github.com/rohitg00/agentmemory)**  
 > Requires [`@agentmemory/agentmemory`](https://github.com/rohitg00/agentmemory) daemon and `iii` engine running locally. Distributed under the [MIT License](./LICENSE).
 
-Links isolated nodes (`NO RELATIONS YET`), permanently deletes unwanted nodes across all 5 storage layers (including `mem:facets`), drains offline capture spools, incrementally inspects & heals `mcp-crash.log` / daemon logs without re-reading fixed lines, and balances thematic clusters in the [AgentMemory](https://github.com/rohitg00/agentmemory) Knowledge Graph (`http://localhost:3113/#graph`) without burning frontier LLM tokens.
+Links isolated nodes (`NO RELATIONS YET`), audits and filters free-LLM hallucinations at 0 token cost, merges duplicate error/entity nodes across all 5 KV storage layers, renames nodes in-place without breaking index postings, safely archives transient scratch nodes into a lossless Cold Graveyard (`~/.agentmemory/graveyard.jsonl`) with `--restore`, optimizes `iii-engine` RAM footprint, incrementally inspects & heals `mcp-crash.log` / daemon logs with a 0-token byte-offset cursor, and balances thematic clusters in the [AgentMemory](https://github.com/rohitg00/agentmemory) Knowledge Graph (`http://localhost:3113/#graph`).
 
 ## Quick start
 
@@ -17,62 +17,66 @@ Links isolated nodes (`NO RELATIONS YET`), permanently deletes unwanted nodes ac
 # 1. Check current unlinked count, edge diversity & cluster topology
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --status
 
-# 2. Beautify & Balance Layout into 6 Thematic Constellations (Recommended)
+# 2. Dry-Run Audit: detect XML-entity clones, duplicate error groups, hallucinations & scratch noise (0 destructive changes)
+node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --audit
+
+# 3. 5-Layer Atomic Deduplication: merge Sentry-style error duplicates & XML-escaped clones into canonical nodes
+node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --dedup
+
+# 4. 5-Layer Atomic In-Place Rename (or automatic merge if target name already exists)
+node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --rename "Old Node Name or gn_id" "Clean New Name"
+
+# 5. Safe Prune to Cold Graveyard (~/.agentmemory/graveyard.jsonl) with Immunity Whitelist protection
+node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --prune
+
+# 6. Lossless Restore from Cold Graveyard (--list, --last, or specific node name/ID)
+node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --restore --list
+node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --restore "Node Name or gn_id"
+
+# 7. One-Shot RAM & Store Optimizer (tunes .env + patches XML parser + dedups + prunes scratch to graveyard + sweeps sessions)
+node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --optimize-ram
+
+# 8. Beautify & Balance Layout into 6 Thematic Constellations (Recommended)
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --beautify
 
-# 3. Permanently Delete Unwanted Nodes, Incident Edges & Facets across all 5 KV layers
+# 9. Permanently Delete Specific Nodes, Incident Edges & Facets (backed up to graveyard.jsonl)
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --delete "Node Name 1" "gn_node_id_2"
 
-# 4. One-Shot Health Recovery (Delta log heal + drain spool + session sweep + verify index)
+# 10. One-Shot Health Recovery (Delta log heal + drain spool + session sweep + verify index)
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --heal
 
-# 5. Incremental Log Inspector (reads ONLY unread bytes from mcp-crash.log & daemon logs)
+# 11. Incremental Log Inspector (reads ONLY unread bytes from mcp-crash.log & daemon logs)
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --logs
 
-# 6. Dump unlinked nodes & front anchors (0..24) for custom semantic curation
+# 12. Dump unlinked nodes & front anchors (0..24) or apply custom JSON relations
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --dump
-
-# 7. Apply custom semantic relations (accepts inline JSON array or JSON file path)
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --apply /path/to/links.json
 
-# 8. Fast Auto-Link (0 external LLM tokens)
+# 13. Fast Auto-Link (0 external LLM tokens)
 node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --auto
 ```
 
-## Why
+## Why v3.0
 
-1. **Bounded `maxReads: 4096` KV Read Cap**:
-   - Reading 500 visible `pageNodes` from the LIFO `"nodes"` posting list consumes ~1,001 KV reads, leaving the remaining budget to scan node adjacency lists starting from `pageNodes[0]`.
-   - Once read budget exhausts, the loop breaks early (`reader.exhausted = true`). Nodes without connections to front-of-queue anchors (`pageNodes[0..24]`) appear as isolated in the bottom grid (`NO RELATIONS YET`).
-2. **5-Layer Permanent Deletion (`--delete`)**:
-   - Deleting a node from `mem:graph:nodes` alone leaves a "ghost" node in the viewer because `queryGraphIndex` reads from `mem:graph:retrieval-data`.
-   - `--delete` unlinks doubly-linked postings in `mem:graph:retrieval-data`, decrements `mem:graph:retrieval-control` counters, removes canonical records in `mem:graph:nodes`/`edges`/`node-degree`/`membership`/`edge-history`, cleans `mem:graph:name-index` & `mem:graph:edge-key`, purges orphaned `mem:facets` (#1642), and rebuilds `mem:graph:snapshot`.
-3. **Zero-Token Incremental Log Cursor (`--logs` & `--heal`)**:
-   - Tracks `ino` and byte `offset` in `~/.agentmemory/.log-heal-cursor.json` across `~/.agentmemory/mcp-crash.log` (#1662/#1674), `~/.agentmemory/mcp-crash.log.1`, `$TMPDIR/agentmemory-mcp-crash.log`, `~/Library/Logs/agentmemory.error.log`, and `~/Library/Logs/agentmemory.log`.
-   - Once log entries are read and healed, the byte cursor advances to `stat.size`. Subsequent runs skip unchanged files completely (`unreadBytesRead: 0`), preventing redundant log reading and saving tokens.
+1. **Zero-Token Hallucination & Provenance Audit (`--audit`)**:
+   - Cross-references node names against the entire local observation, memory, and summary corpus (`mem:obs:*`, `mem:memories`, `mem:summaries`) plus a comprehensive Tech Lexicon and off-domain hallucination filter. Catches free-LLM hallucinations (e.g., `"invasion German"`, `"Craig"`, `"Fightnite"`, diacritic typos) in `<400ms` with **0 API calls and 0 LLM tokens**.
+2. **Sentry-Style Error Fingerprinting & 5-Layer Atomic Merge/Rename (`--dedup` & `--rename`)**:
+   - Collapses repetitive error nodes (e.g., 17 variants of `ProcessException: exit code 72 ... xcodebuild`) and case/XML-entity duplicates (`Flutter` vs `flutter`, `GlobalKey&amp;lt;FormState&amp;gt;`) into a single Canonical Node, re-pointing incident edges, incrementing `properties.occurrences`, and updating all 5 KV layers (`mem:graph:retrieval-data`, `mem:graph:retrieval-control`, `mem:graph:nodes`, `mem:graph:name-index`, `mem:graph:node-degree`).
+   - Self-patches `parseAttrs(raw)` in AgentMemory's `dist/index.mjs` and `dist/compression-recovery-*.mjs` so XML entities (`&quot;`, `&lt;`, `&gt;`, `&amp;`) are decoded natively during graph extraction and never spawn `&amp;quot;` phantom clones.
+3. **Cold Graveyard (`~/.agentmemory/graveyard.jsonl`) & Immunity Whitelist (`--prune` & `--restore`)**:
+   - Protects critical knowledge via an **Immunity Whitelist** (`decision`, `preference`, `pattern`, `person`, `project`, `milestone`, any `error` node with a `fixes` edge, and `degree >= 4` hubs).
+   - Evicts transient `.system_generated/`, `.user_uploaded/`, `/tmp/` scratch nodes and hallucinations out of `iii-engine` RAM into `~/.agentmemory/graveyard.jsonl` (saving full node + incident edges + facets) so any node can be restored 100% losslessly via `--restore`.
+4. **Real `iii-engine` RAM Reduction (`--optimize-ram`)**:
+   - Targets the Rust `iii-engine` in-memory KV state by freeing tens of thousands of doubly-linked posting list records in `mem:graph:retrieval-data` and tuning `MAX_OBS_PER_SESSION=800` & `AGENTMEMORY_CAPTURE_OUTPUT_MAX=3500` in `~/.agentmemory/.env`.
 
 ## Workflow
 
-1. **Inspect status, logs, or heal**: Run `--status`, `--logs`, or `--heal` to check unread crash/daemon logs, flush any pending capture spool, sweep abandoned sessions (#1645), and inspect `unlinkedCount`.
-2. **Delete unwanted nodes (if any)**: Run `--delete "<name_or_id>"` before linking so deleted nodes and their facets do not leave orphaned neighbors.
-3. **Link & Beautify**:
-   - **Beautify Mode (`--beautify`)**: Classifies unlinked nodes into 6 domains (AI Models, AgentMemory Core, Mobile Ecosystem, Flutter UI, macOS Audio, Dev Tools), attaches them to front-of-queue anchors (`pageNodes[0..20]`) with semantic relations (`uses`, `depends_on`, `modifies`, `fixes`, `imports`, `causes`), and automatically sweeps any boundary nodes (`idx 475..499`) that shift into the 500-node window.
-   - **AI-Curated Mode (`--dump` + `--apply`)**:
-     1. Run `--dump` to inspect `frontAnchors` (`0..24`) and `unlinked`.
-     2. Write semantic links (`source`, `sourceType`, `target`, `targetType`, `type`, `weight`) to a JSON file.
-     3. Run `--apply /path/to/file.json`. Automatically bridges deep chains (`idx >= 25`) to `pageNodes[0..24]` and splits same-name entities with different types into non-colliding XML batches.
-4. **Verify**: Run `--status` to confirm `unlinkedCount: 0` and `sparseWarningActive: false`.
-
-## Anti-patterns
-
-- **WRONG**: Re-reading entire `mcp-crash.log` or `agentmemory.error.log` files manually on every check, wasting context tokens on errors that were already fixed.
-- **RIGHT**: Run `graph-linker.mjs --logs` (or `--heal`), which uses `~/.agentmemory/.log-heal-cursor.json` to read only new unread bytes (`0 bytes` when unchanged).
-- **WRONG**: Linking unlinked nodes only to older hubs at `pageNodes[100..499]`. Those hubs are scanned after `reader.exhausted` hits the read budget, so edges stay invisible in the 500-node viewer.
-- **RIGHT**: Always target anchors in `pageNodes[0..24]` (or let `--apply` auto-bridge deep chains).
-- **WRONG**: Deleting nodes only in `mem:graph:nodes` without unlinking `mem:graph:retrieval-data` and `mem:facets`.
-- **RIGHT**: Always use `graph-linker.mjs --delete`, which cleans all 5 storage layers.
+1. **Inspect status or run audit**: Run `--status` or `--audit` to inspect unlinked nodes, duplicate groups, hallucinations, and transient scratch noise.
+2. **Optimize & Deduplicate**: Run `--optimize-ram` (or `--dedup` + `--prune`) to merge duplicate nodes, clean XML entity corruption, and archive scratch noise to `graveyard.jsonl`.
+3. **Rename or Restore (if needed)**: Use `--rename "<old>" "<new>"` to fix node names across all 5 KV layers, or `--restore "<name_or_id>"` to recover any archived node from `graveyard.jsonl`.
+4. **Link & Beautify**: Run `--beautify` (or `--auto`) to connect all unlinked nodes into 6 balanced thematic constellations.
 
 ## See also
 
-- [REFERENCE.md](REFERENCE.md) for the `maxReads: 4096` math, 5-layer KV deletion architecture, incremental log cursor design, Smart Router v2.2 safeguards, and v2.2 changelog.
+- [REFERENCE.md](REFERENCE.md) for the 5-layer KV engine math (`projectRecord` + `applyRetrievalRecord`), Cold Graveyard schema, Provenance Audit design, and v3.0 changelog.
 - [scripts/graph-linker.mjs](scripts/graph-linker.mjs) for the executable CLI implementation.
