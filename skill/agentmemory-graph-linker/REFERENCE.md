@@ -1,4 +1,4 @@
-# AgentMemory Knowledge Graph Linker Reference (v3.0)
+# AgentMemory Knowledge Graph Linker Reference (v3.1)
 
 ## 1. The `maxReads: 4096` KV Budget Architecture
 
@@ -81,6 +81,11 @@ Why AgentMemory can consume ~1 GB RAM on Intel Macs:
 ---
 
 ## 6. Changelog
+
+### v3.1 (2026-11-08)
+- **Maintenance Lock Mode (`--lock` & `--unlock`)**: Allows freezing background LLM graph extraction via `~/.agentmemory/maintenance.lock`. When active, `smart-router.mjs` immediately intercepts background graph extraction prompts and returns empty `<entities></entities><relationships></relationships>` in 0ms consuming 0 tokens. Auto-locks during `--beautify` and `--optimize-ram` to prevent phantom nodes from being injected during maintenance.
+- **CJK Foreign Language & Hallucination Gate**: Drops unmapped CJK characters at the router gate and audit level to prevent foreign language noise from OCR weights or model logs from polluting the knowledge graph, while auto-mapping standard technical terms (e.g. `多Token预测` -> `Multi-Token Prediction (MTP)`, `逆向工程` -> `Reverse Engineering`). Blocks bizarre music/hallucination connections (e.g. `Hollywood Tonight`).
+- **Audit CJK Candidate Reporting**: Flags unmapped CJK nodes during `--audit` and includes them in `--prune` to the Cold Graveyard.
 
 ### v3.0 (2026-11-07)
 - **Zero-Token Provenance & Hallucination Audit (`--audit`)**: Cross-checks nodes against the full `mem:obs:*` + `mem:memories` + `mem:summaries` corpus and `TECH_LEXICON` in `<400ms` with 0 LLM tokens.

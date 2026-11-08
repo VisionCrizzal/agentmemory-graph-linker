@@ -12,8 +12,24 @@ import os from "node:os";
  * - Instant Zero-Token DIRECT_GRAPH_XML passthrough (<1ms)
  */
 
+const AGENTMEMORY_DIR = process.env.AGENTMEMORY_DATA_DIR || path.join(os.homedir(), ".agentmemory");
+const MAINTENANCE_LOCK_PATH = path.join(AGENTMEMORY_DIR, "maintenance.lock");
+
 const HALLUCINATION_ENTITY_REGEX =
-  /\b(invasion\s+german|german\s+invasion|third\s+reich|adolf\s+hitler|nazi\s+party|world\s+war\s+ii|holocaust|soviet\s+invasion|roman\s+empire|medieval\s+europe)\b/i;
+  /\b(invasion\s+german|german\s+invasion|third\s+reich|adolf\s+hitler|nazi\s+party|world\s+war\s+ii|holocaust|soviet\s+invasion|roman\s+empire|medieval\s+europe|hollywood\s+tonight)\b/i;
+
+const CJK_REGEX = /[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff\uac00-\ud7af]/;
+
+const CJK_CANONICAL_MAP = new Map([
+  ["多token预测", "Multi-Token Prediction (MTP)"],
+  ["多Token预测", "Multi-Token Prediction (MTP)"],
+  ["逆向工程", "Reverse Engineering"],
+  ["グラフ解析", "Graph Analysis"],
+  ["グラフ", "Graph"],
+  ["深層学習", "Deep Learning"],
+  ["機械学習", "Machine Learning"],
+  ["自然言語処理", "Natural Language Processing"]
+]);
 
 function isNoisyScratchEntityName(name) {
   const nm = String(name || "").trim();
@@ -29,7 +45,9 @@ function isNoisyScratchEntityName(name) {
   ) {
     return true;
   }
-  return HALLUCINATION_ENTITY_REGEX.test(nm);
+  if (HALLUCINATION_ENTITY_REGEX.test(nm)) return true;
+  if (CJK_REGEX.test(nm) && !CJK_CANONICAL_MAP.has(nm)) return true;
+  return false;
 }
 
 function unescapeNestedXmlAttr(val) {
@@ -57,7 +75,10 @@ function sanitizeGraphXmlOutput(xml) {
   let cleaned = xml.replace(/<entity\b([^>]*?)\/>/gi, (full, attrs) => {
     const nameMatch = /\bname="([^"]*)"/i.exec(attrs);
     if (!nameMatch) return full;
-    const cleanAttrName = unescapeNestedXmlAttr(nameMatch[1]);
+    let cleanAttrName = unescapeNestedXmlAttr(nameMatch[1]);
+    if (CJK_CANONICAL_MAP.has(cleanAttrName)) {
+      cleanAttrName = CJK_CANONICAL_MAP.get(cleanAttrName);
+    }
     if (isNoisyScratchEntityName(cleanAttrName)) {
       blockedNames.add(nameMatch[1]);
       blockedNames.add(cleanAttrName);
@@ -71,8 +92,10 @@ function sanitizeGraphXmlOutput(xml) {
     const sMatch = /\bsource="([^"]*)"/i.exec(attrs);
     const tMatch = /\btarget="([^"]*)"/i.exec(attrs);
     if (!sMatch || !tMatch) return full;
-    const sClean = unescapeNestedXmlAttr(sMatch[1]);
-    const tClean = unescapeNestedXmlAttr(tMatch[1]);
+    let sClean = unescapeNestedXmlAttr(sMatch[1]);
+    let tClean = unescapeNestedXmlAttr(tMatch[1]);
+    if (CJK_CANONICAL_MAP.has(sClean)) sClean = CJK_CANONICAL_MAP.get(sClean);
+    if (CJK_CANONICAL_MAP.has(tClean)) tClean = CJK_CANONICAL_MAP.get(tClean);
     if (
       blockedNames.has(sMatch[1]) ||
       blockedNames.has(sClean) ||
@@ -580,6 +603,34 @@ const server = http.createServer(async (req, res) => {
     : isGraphExtraction
     ? "graph"
     : "any";
+
+  const isMaintenanceLocked = fs.existsSync(MAINTENANCE_LOCK_PATH);
+
+  // If maintenance lock is active, freeze background LLM graph extraction (0 tokens, 0ms)
+  if (isMaintenanceLocked && isGraphExtraction && !allUserText.includes("DIRECT_GRAPH_XML")) {
+    console.log("🔒 [Smart Router] Maintenance Lock active: Blocked background graph extraction prompt (0 tokens, 0ms)");
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        id: `chatcmpl-maintenance-locked-${Date.now()}`,
+        object: "chat.completion",
+        created: Math.floor(Date.now() / 1000),
+        model: "maintenance-lock-frozen",
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: "<entities>\n</entities>\n<relationships>\n</relationships>"
+            },
+            finish_reason: "stop"
+          }
+        ],
+        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+      })
+    );
+    return;
+  }
 
   if (!isSummarize && isGraphExtraction && allUserText.includes("DIRECT_GRAPH_XML")) {
     const xmlMatch = allUserText.match(/<entities>[\s\S]*?<\/relationships>/);

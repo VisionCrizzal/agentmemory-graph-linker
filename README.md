@@ -1,4 +1,4 @@
-# AgentMemory Knowledge Graph Linker, Deduplicator, Cleaner & Smart AI Router (v3.0)
+# AgentMemory Knowledge Graph Linker, Deduplicator, Cleaner & Smart AI Router (v3.1)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Companion for AgentMemory](https://img.shields.io/badge/Companion%20For-rohitg00%2Fagentmemory-blue.svg)](https://github.com/rohitg00/agentmemory)
@@ -10,27 +10,31 @@
 > This toolkit is an essential companion skill specifically designed for **[AgentMemory (`rohitg00/agentmemory`)](https://github.com/rohitg00/agentmemory)**.
 > It operates directly with the `@agentmemory/agentmemory` daemon, `iii-sdk` WebSocket (`ws://127.0.0.1:49134`), and Knowledge Graph endpoints (`http://localhost:3113/#graph`). You must have [AgentMemory](https://github.com/rohitg00/agentmemory) installed and running to use this skill.
 
-A lightweight **Antigravity Skill (`agentmemory-graph-linker`)** and **11-Tier Smart AI Router (v3.0)** that links isolated (`UNLINKED / NO RELATIONS YET`) nodes, audits & filters free-LLM hallucinations at **0 token cost**, merges duplicate error & entity nodes across all 5 KV storage layers, renames nodes atomically in-place, safely archives transient scratch noise to a lossless **Cold Graveyard (`~/.agentmemory/graveyard.jsonl`)** with `--restore`, optimizes `iii-engine` RAM footprint, incrementally inspects & heals `mcp-crash.log` and daemon logs with a **0-token byte-offset cursor**, and balances thematic clusters in the [AgentMemory](https://github.com/rohitg00/agentmemory) Knowledge Graph (`http://localhost:3113/#graph`).
+A lightweight **Antigravity Skill (`agentmemory-graph-linker`)** and **11-Tier Smart AI Router (v3.1)** that links isolated (`UNLINKED / NO RELATIONS YET`) nodes, freezes background LLM graph pollution via **Maintenance Lock** (`--lock`/`--unlock`), audits & filters free-LLM & unmapped CJK hallucinations at **0 token cost**, merges duplicate error & entity nodes across all 5 KV storage layers, renames nodes atomically in-place, safely archives transient scratch noise to a lossless **Cold Graveyard (`~/.agentmemory/graveyard.jsonl`)** with `--restore`, optimizes `iii-engine` RAM footprint, incrementally inspects & heals `mcp-crash.log` and daemon logs with a **0-token byte-offset cursor**, and balances thematic clusters in the [AgentMemory](https://github.com/rohitg00/agentmemory) Knowledge Graph (`http://localhost:3113/#graph`).
 
 ---
 
-## ✨ Key Features (v3.0)
+## ✨ Key Features (v3.1)
 
-1. **Zero-Token Provenance & Hallucination Audit (`--audit`)**:
+1. **Maintenance Lock Mode (`--lock` & `--unlock`)**:
+   - Creates a temporary lock flag (`~/.agentmemory/maintenance.lock`). When active, `smart-router.mjs` immediately short-circuits background LLM graph extraction requests with empty XML tags (`<entities></entities><relationships></relationships>`) at **0ms latency and 0 tokens**. Auto-locks during `--beautify` and `--optimize-ram` to prevent background LLMs from polluting the graph during maintenance.
+2. **CJK & Off-Domain Foreign Language Gate**:
+   - Rejects unmapped CJK characters at the router gate and audit level to prevent foreign language noise from OCR weights or model logs from polluting the knowledge graph, while auto-mapping standard technical terms (e.g. `多Token预测` -> `Multi-Token Prediction (MTP)`, `逆向工程` -> `Reverse Engineering`). Blocks bizarre music/hallucination connections (e.g. `Hollywood Tonight`).
+3. **Zero-Token Provenance & Hallucination Audit (`--audit`)**:
    - Cross-references graph nodes against your entire local observation, memory, and summary corpus (`mem:obs:*`, `mem:memories`, `mem:summaries`) plus a Tech Lexicon and off-domain hallucination detector in `< 400ms` over WebSocket.
-   - Catches free-LLM hallucinations (e.g., `"invasion German"`, `"Craig"`, `"Fightnite"`, diacritic typos), XML entity corruption (`&amp;quot;`), duplicate error clusters, and ephemeral scratch files with **0 API calls and 0 LLM tokens**.
-2. **Sentry-Style Error Deduplication & 5-Layer Atomic Merge/Rename (`--dedup` & `--rename`)**:
+   - Catches free-LLM hallucinations, XML entity corruption (`&amp;quot;`), duplicate error clusters, and ephemeral scratch files with **0 API calls and 0 LLM tokens**.
+4. **Sentry-Style Error Deduplication & 5-Layer Atomic Merge/Rename (`--dedup` & `--rename`)**:
    - Collapses repetitive error nodes (e.g. multiple `ProcessException: exit code 72 ... xcodebuild` variants), case-insensitive duplicates (`Flutter` vs `flutter`), and XML-escaped clones (`GlobalKey&amp;lt;FormState&amp;gt;`) into a single **Canonical Node**, re-pointing all incident edges across all 5 KV layers and tracking `properties.occurrences`.
    - `--rename "<old>" "<new>" [--type <type>]` renames any node in-place across `mem:graph:nodes`, `mem:graph:name-index`, and `mem:graph:retrieval-data` (or automatically merges if the target name already exists).
    - Self-patches `parseAttrs(raw)` in AgentMemory's `dist/*.mjs` so XML entities (`&quot;`, `&lt;`, `&gt;`, `&amp;`) are decoded natively and never create phantom `&amp;quot;` nodes again.
-3. **Cold Graveyard (`~/.agentmemory/graveyard.jsonl`) & Immunity Whitelist (`--prune` & `--restore`)**:
+5. **Cold Graveyard (`~/.agentmemory/graveyard.jsonl`) & Immunity Whitelist (`--prune` & `--restore`)**:
    - **Immunity Whitelist ("Kim Bài Miễn Tử")**: Automatically protects `decision`, `preference`, `pattern`, `person`, `project`, `milestone`, any `error` node with a `fixes` edge, thematic anchors, and `degree >= 4` hubs from pruning.
    - **Lossless Cold Storage**: Before `--prune`, `--dedup`, or `--delete` removes any node from the 5 KV layers, the full node + incident edges + facets are saved to `~/.agentmemory/graveyard.jsonl`. Restore any node at any time with `--restore "<name_or_id>"` (or `--restore --last`).
-4. **Real `iii-engine` RAM Optimization (`--optimize-ram`)**:
+6. **Real `iii-engine` RAM Optimization (`--optimize-ram`)**:
    - Targets the Rust `iii-engine` in-memory KV footprint by evicting tens of thousands of redundant doubly-linked posting list records from `mem:graph:retrieval-data` and tuning `MAX_OBS_PER_SESSION=800` & `AGENTMEMORY_CAPTURE_OUTPUT_MAX=3500` in `~/.agentmemory/.env`.
-5. **Zero-Token Incremental Log Inspector (`--logs` & `--heal`, #1662 / #1674) & Smart AI Router v3.0**:
+7. **Zero-Token Incremental Log Inspector (`--logs` & `--heal`, #1662 / #1674) & Smart AI Router v3.1**:
    - Tracks `{ ino, offset, mtimeMs }` in `~/.agentmemory/.log-heal-cursor.json` so already-read log lines in `mcp-crash.log` and daemon logs are skipped with `0 bytes` read.
-   - `smart-router.mjs` v3.0 includes Truncated Reply Failover (#1495), Surrogate-Safe Slicing (#1598), nested XML entity unescaping, and an `<entities>` scratch/hallucination noise gate.
+   - `smart-router.mjs` v3.1 includes Truncated Reply Failover (#1495), Surrogate-Safe Slicing (#1598), nested XML entity unescaping, and an `<entities>` scratch/hallucination/CJK noise gate.
 
 ---
 
