@@ -2094,20 +2094,10 @@ function applySystemAndRamPatches(options = { tuneRamEnv: false }) {
 
     if (options.tuneRamEnv) {
       const tunedItems = [];
-      // Lower MAX_OBS_PER_SESSION from 5000 -> 800 to prevent raw observation memory bloat
-      if (/^MAX_OBS_PER_SESSION=\d+/m.test(envContent)) {
-        const m = envContent.match(/^MAX_OBS_PER_SESSION=(\d+)/m);
-        if (m && Number(m[1]) > 1000) {
-          envContent = envContent.replace(
-            /^MAX_OBS_PER_SESSION=\d+/m,
-            "MAX_OBS_PER_SESSION=800"
-          );
-          tunedItems.push("MAX_OBS_PER_SESSION=800");
-          modified = true;
-        }
-      } else {
-        envContent = envContent.trimEnd() + "\nMAX_OBS_PER_SESSION=800\n";
-        tunedItems.push("MAX_OBS_PER_SESSION=800");
+      // Support MAX_OBS_PER_SESSION=0 (0 = no cap) to prevent dead letter rejections in long sessions
+      if (!/^MAX_OBS_PER_SESSION=\d+/m.test(envContent)) {
+        envContent = envContent.trimEnd() + "\nMAX_OBS_PER_SESSION=0\n";
+        tunedItems.push("MAX_OBS_PER_SESSION=0");
         modified = true;
       }
 
