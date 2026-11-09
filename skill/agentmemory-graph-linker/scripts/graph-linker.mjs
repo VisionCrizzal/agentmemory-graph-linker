@@ -153,7 +153,8 @@ const IMMUNE_NODE_TYPES = new Set([
   "pattern",
   "person",
   "project",
-  "milestone"
+  "milestone",
+  "song"
 ]);
 
 // Comprehensive Tech & Project Lexicon for 0-Token Grounding Verification
@@ -172,12 +173,14 @@ const TECH_LEXICON = new Set([
   "firefox", "chrome", "devtools", "ublock", "nextdns", "bluetooth", "toothfairy",
   "homebrew", "fedora", "bootcamp", "uefi", "firmware", "shopeasy", "widget",
   "state", "layout", "theme", "animation", "firebase", "firestore", "auth",
-  "openssh", "alpine", "docker", "linux", "ssh", "vscode", "cursor", "launchctl"
+  "openssh", "alpine", "docker", "linux", "ssh", "vscode", "cursor", "launchctl",
+  "music", "song", "track", "artist", "album", "flac", "alac", "hi-res", "lossless",
+  "jackson", "michael", "daft", "iina", "sangeet"
 ]);
 
 // Explicit Off-Domain Hallucination Blocklist (catches free-LLM wild associations)
 const HALLUCINATION_REGEX =
-  /\b(invasion\s+german|german\s+invasion|third\s+reich|adolf\s+hitler|nazi\s+party|world\s+war\s+ii|holocaust|soviet\s+invasion|roman\s+empire|medieval\s+europe|napoleonic|hollywood\s+tonight)\b/i;
+  /\b(invasion\s+german|german\s+invasion|third\s+reich|adolf\s+hitler|nazi\s+party|world\s+war\s+ii|holocaust|soviet\s+invasion|roman\s+empire|medieval\s+europe|napoleonic)\b/i;
 
 const CJK_REGEX = /[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff\uac00-\ud7af]/;
 
@@ -245,12 +248,15 @@ const THEMATIC_DOMAINS = [
   },
   {
     id: "macos_audio",
-    label: "macOS CoreAudio & Hardware",
+    label: "macOS Hardware & Hi-Res Audio",
     anchor: { name: "MacBook Pro", type: "concept" },
     subAnchor: { name: "CoreAudio HAL", type: "concept" },
     keywords: [
       "audio", "coreaudio", "hal", "ark", "driver", "amcp", "plug-in", "volume",
-      "applescript", "macbook", "dgpu", "thermal", "kernel", "fedora", "coreaudiod", "xcode", "egpu"
+      "applescript", "macbook", "dgpu", "thermal", "kernel", "fedora", "coreaudiod", "xcode", "egpu",
+      "music", "song", "track", "album", "artist", "flac", "alac", "hi-res", "lossless", "bit-perfect",
+      "midi", "hz", "sample rate", "khz", "dac", "dsp", "speaker", "headphone", "iina", "pine player",
+      "sangeet", "michael jackson", "hollywood tonight", "daft punk"
     ]
   },
   {
@@ -771,6 +777,14 @@ function isNodeImmune(node, degree, fixedNodeIds) {
   if (!node) return false;
   if (isTransientScratchNode(node)) return false;
   if (IMMUNE_NODE_TYPES.has(node.type)) return true;
+  if (
+    node.type === "song" ||
+    node.properties?.artist ||
+    node.properties?.category === "song title" ||
+    String(node.name || "").toLowerCase().includes("hollywood tonight")
+  ) {
+    return true;
+  }
   if (IMMUNE_ANCHOR_NAMES.has(String(node.name || "").toLowerCase())) return true;
   if (node.type === "error" && fixedNodeIds.has(node.id)) return true;
   if (degree >= 4) return true;
@@ -805,6 +819,14 @@ function buildDeduplicationPlan(allNodes, degreeMap, fixedNodeIds) {
       const canonical = CJK_CANONICAL_MAP.get(unescaped);
       groupKey = `${node.type}|${canonical.toLowerCase()}`;
       suggestedCanonicalName = canonical;
+    } else if (
+      node.type === "song" ||
+      node.properties?.artist ||
+      node.properties?.category === "song title" ||
+      unescaped.toLowerCase() === "hollywood tonight"
+    ) {
+      groupKey = `song|${unescaped.toLowerCase()}`;
+      suggestedCanonicalName = unescaped;
     } else {
       groupKey = `${node.type}|${unescaped.toLowerCase()}`;
     }
@@ -812,7 +834,7 @@ function buildDeduplicationPlan(allNodes, degreeMap, fixedNodeIds) {
     if (!groupsByKey.has(groupKey)) {
       groupsByKey.set(groupKey, {
         groupKey,
-        type: node.type,
+        type: groupKey.startsWith("song|") ? "song" : node.type,
         suggestedCanonicalName,
         nodes: []
       });
@@ -839,17 +861,19 @@ function buildDeduplicationPlan(allNodes, degreeMap, fixedNodeIds) {
     }
 
     // Score each candidate in the group to pick the best Canonical Winner:
-    // Prefer clean (non-XML-corrupted) name, prefer fixed error, prefer uppercase/TitleCase over all-lowercase, prefer higher degree
+    // Prefer clean (non-XML-corrupted) name, prefer fixed error, prefer uppercase/TitleCase over all-lowercase, prefer higher degree, prefer song type
     const scored = list.map((n) => {
       const deg = degreeMap.get(n.id) || 0;
       const corrupted = isXmlEntityCorrupted(n.name) || n.name.endsWith("\\");
       const exactCanonical = n.name === group.suggestedCanonicalName;
       const hasUpper = /[A-ZÀ-Ỹ]/.test(n.name);
       const isFixed = fixedNodeIds.has(n.id);
+      const isSongType = n.type === "song";
       const score =
         (corrupted ? -1000 : 500) +
         (exactCanonical ? 300 : 0) +
         (isFixed ? 200 : 0) +
+        (isSongType ? 300 : 0) +
         (hasUpper ? 50 : 0) +
         deg * 5;
       return { node: n, score, deg, corrupted };
@@ -2320,6 +2344,19 @@ function classifyNodeDomain(node) {
   const name = (node.name || "").toLowerCase();
   const type = node.type || "concept";
 
+  if (
+    type === "song" ||
+    node.properties?.artist ||
+    node.properties?.category === "song title" ||
+    name.includes("hollywood tonight") ||
+    name.includes("michael jackson") ||
+    name.includes("flac") ||
+    name.includes("coreaudio") ||
+    name.includes("sample rate")
+  ) {
+    return THEMATIC_DOMAINS[4];
+  }
+
   let bestDomain = THEMATIC_DOMAINS[5]; // default: dev_tooling
   let maxScore = 0;
 
@@ -2345,6 +2382,14 @@ function classifyNodeDomain(node) {
 function determineSemanticRelation(node) {
   const type = node.type || "concept";
   const name = (node.name || "").toLowerCase();
+
+  if (
+    type === "song" ||
+    node.properties?.artist ||
+    node.properties?.category === "song title"
+  ) {
+    return "uses";
+  }
 
   if (type === "file") {
     if (
@@ -2426,6 +2471,16 @@ function pickSemanticAnchor(unlinkedNode, frontAnchors, fallbackIdx) {
     if (
       (type === "file" &&
         (anchor.type === "file" || aName.includes("skill") || aName.includes("file"))) ||
+      ((type === "song" ||
+        unlinkedNode.properties?.artist ||
+        name.includes("hollywood tonight") ||
+        name.includes("michael jackson") ||
+        name.includes("flac") ||
+        name.includes("audio") ||
+        name.includes("coreaudio") ||
+        name.includes("iina") ||
+        name.includes("sangeet")) &&
+        (aName.includes("macbook") || aName.includes("audio") || aName.includes("coreaudio"))) ||
       ((name.includes("firefox") ||
         name.includes("chrome") ||
         name.includes("extension") ||
@@ -2954,7 +3009,14 @@ async function runBeautify(secret) {
         !targetAnchor ||
         (targetAnchor.name === node.name && targetAnchor.type === node.type)
       ) {
-        targetAnchor = pickSemanticAnchor(node, frontAnchors, i).anchor;
+        if (
+          domain.anchor &&
+          (domain.anchor.name !== node.name || domain.anchor.type !== node.type)
+        ) {
+          targetAnchor = domain.anchor;
+        } else {
+          targetAnchor = pickSemanticAnchor(node, frontAnchors, i).anchor;
+        }
       }
 
       if (

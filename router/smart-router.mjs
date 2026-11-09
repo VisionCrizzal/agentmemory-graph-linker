@@ -16,7 +16,7 @@ const AGENTMEMORY_DIR = process.env.AGENTMEMORY_DATA_DIR || path.join(os.homedir
 const MAINTENANCE_LOCK_PATH = path.join(AGENTMEMORY_DIR, "maintenance.lock");
 
 const HALLUCINATION_ENTITY_REGEX =
-  /\b(invasion\s+german|german\s+invasion|third\s+reich|adolf\s+hitler|nazi\s+party|world\s+war\s+ii|holocaust|soviet\s+invasion|roman\s+empire|medieval\s+europe|hollywood\s+tonight)\b/i;
+  /\b(invasion\s+german|german\s+invasion|third\s+reich|adolf\s+hitler|nazi\s+party|world\s+war\s+ii|holocaust|soviet\s+invasion|roman\s+empire|medieval\s+europe)\b/i;
 
 const CJK_REGEX = /[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff\uac00-\ud7af]/;
 
