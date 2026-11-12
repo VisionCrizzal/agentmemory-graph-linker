@@ -2,14 +2,16 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { fileURLToPath } from "node:url";
 
 /**
- * AgentMemory 11-Tier Fault-Tolerant Smart AI Router (v3.0)
+ * AgentMemory 11-Tier Task-Aware Fault-Tolerant Smart AI Router (v4.0)
+ * - Task-aware model tiering (fast high-quota for <observation>, accuracy-first for <summary> & <entities>)
  * - Surrogate-safe UTF-16 prompt & fallback slicing (#1598)
  * - Truncated reply (finish_reason === "length" / unclosed XML) detection & automatic tier failover (#1495)
- * - Zero-Token Hallucination & Scratch Noise Gate on <entities> XML
+ * - Zero-Token Hallucination, Unicode dash & Scratch Noise Gate on <entities>, <observation>, and <summary> XML
  * - Nested XML entity unescaping so &amp;quot; / &amp;lt; phantoms never enter the graph
- * - Instant Zero-Token DIRECT_GRAPH_XML passthrough (<1ms)
+ * - Instant Zero-Token DIRECT_GRAPH_XML passthrough (<1ms) and Maintenance Lock freeze
  */
 
 const AGENTMEMORY_DIR = process.env.AGENTMEMORY_DATA_DIR || path.join(os.homedir(), ".agentmemory");
@@ -31,13 +33,24 @@ const CJK_CANONICAL_MAP = new Map([
   ["自然言語処理", "Natural Language Processing"]
 ]);
 
+function normalizeUnicodeDashes(str) {
+  return String(str || "")
+    .normalize("NFKC")
+    .replace(/[\u2010-\u2015\u2212\u00ad]/g, "-")
+    .replace(/[\u200b-\u200d\ufeff]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function isNoisyScratchEntityName(name) {
-  const nm = String(name || "").trim();
+  const nm = normalizeUnicodeDashes(name);
   if (!nm) return true;
   if (
-    nm.includes("/.system_generated/tasks/") ||
-    nm.includes("/.system_generated/steps/") ||
+    nm.includes("/.system_generated/") ||
     nm.includes("/.user_uploaded/media_") ||
+    /^media_\d+_[0-9a-f]+\.[a-z0-9]+$/i.test(nm) ||
+    /^task-\d+\.log$/i.test(nm) ||
+    /^steps\/\d+\/output\.txt$/i.test(nm) ||
     nm.startsWith("/tmp/") ||
     nm.startsWith("/private/tmp/") ||
     nm.includes("/var/folders/") ||
@@ -62,6 +75,7 @@ function unescapeNestedXmlAttr(val) {
     if (next === s) break;
     s = next;
   }
+  s = normalizeUnicodeDashes(s);
   return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -69,47 +83,112 @@ function unescapeNestedXmlAttr(val) {
     .replace(/"/g, "&quot;");
 }
 
+function unescapeXmlValue(val) {
+  let s = String(val || "");
+  for (let i = 0; i < 8; i++) {
+    const next = s
+      .replace(/&quot;/gi, '"')
+      .replace(/&apos;/gi, "'")
+      .replace(/&gt;/gi, ">")
+      .replace(/&lt;/gi, "<")
+      .replace(/&amp;/gi, "&");
+    if (next === s) break;
+    s = next;
+  }
+  return normalizeUnicodeDashes(s);
+}
+
+function sanitizeObservationOrSummaryXml(xml) {
+  let cleaned = xml.replace(/<file\b([^>]*)>([\s\S]*?)<\/file>/gi, (full, attrs, inner) => {
+    const raw = unescapeXmlValue(inner);
+    if (!raw || isNoisyScratchEntityName(raw)) return "";
+    return `<file${attrs}>${escapeXml(raw)}</file>`;
+  });
+  cleaned = cleaned.replace(/<concept\b([^>]*)>([\s\S]*?)<\/concept>/gi, (full, attrs, inner) => {
+    let raw = unescapeXmlValue(inner);
+    if (CJK_CANONICAL_MAP.has(raw)) raw = CJK_CANONICAL_MAP.get(raw);
+    if (!raw || isNoisyScratchEntityName(raw)) return "";
+    return `<concept${attrs}>${escapeXml(raw)}</concept>`;
+  });
+  return cleaned;
+}
+
 function sanitizeGraphXmlOutput(xml) {
   const blockedNames = new Set();
-  // Clean <entity .../> tags and filter out scratch/hallucination entities
-  let cleaned = xml.replace(/<entity\b([^>]*?)\/>/gi, (full, attrs) => {
+
+  const sanitizeEntity = (attrs, body = null) => {
     const nameMatch = /\bname="([^"]*)"/i.exec(attrs);
-    if (!nameMatch) return full;
-    let cleanAttrName = unescapeNestedXmlAttr(nameMatch[1]);
-    if (CJK_CANONICAL_MAP.has(cleanAttrName)) {
-      cleanAttrName = CJK_CANONICAL_MAP.get(cleanAttrName);
-    }
-    if (isNoisyScratchEntityName(cleanAttrName)) {
+    if (!nameMatch) return null;
+    const rawDecoded = unescapeXmlValue(nameMatch[1]);
+    const mapped = CJK_CANONICAL_MAP.has(rawDecoded)
+      ? CJK_CANONICAL_MAP.get(rawDecoded)
+      : rawDecoded;
+    if (isNoisyScratchEntityName(mapped)) {
       blockedNames.add(nameMatch[1]);
-      blockedNames.add(cleanAttrName);
+      blockedNames.add(rawDecoded);
+      blockedNames.add(mapped);
       return "";
     }
-    return full.replace(/\bname="([^"]*)"/i, `name="${cleanAttrName}"`);
-  });
+    const cleanAttrName = unescapeNestedXmlAttr(mapped);
+    const updatedAttrs = attrs.replace(/\bname="([^"]*)"/i, `name="${cleanAttrName}"`);
+    return body === null ? `<entity${updatedAttrs}/>` : `<entity${updatedAttrs}>${body}</entity>`;
+  };
 
-  // Clean <relationship .../> tags and drop relationships referencing blocked entities
-  cleaned = cleaned.replace(/<relationship\b([^>]*?)\/>/gi, (full, attrs) => {
+  const sanitizeRelationship = (attrs, body = null) => {
     const sMatch = /\bsource="([^"]*)"/i.exec(attrs);
     const tMatch = /\btarget="([^"]*)"/i.exec(attrs);
-    if (!sMatch || !tMatch) return full;
-    let sClean = unescapeNestedXmlAttr(sMatch[1]);
-    let tClean = unescapeNestedXmlAttr(tMatch[1]);
-    if (CJK_CANONICAL_MAP.has(sClean)) sClean = CJK_CANONICAL_MAP.get(sClean);
-    if (CJK_CANONICAL_MAP.has(tClean)) tClean = CJK_CANONICAL_MAP.get(tClean);
+    if (!sMatch || !tMatch) return null;
+    const sDecoded = unescapeXmlValue(sMatch[1]);
+    const tDecoded = unescapeXmlValue(tMatch[1]);
+    const sMapped = CJK_CANONICAL_MAP.has(sDecoded) ? CJK_CANONICAL_MAP.get(sDecoded) : sDecoded;
+    const tMapped = CJK_CANONICAL_MAP.has(tDecoded) ? CJK_CANONICAL_MAP.get(tDecoded) : tDecoded;
     if (
       blockedNames.has(sMatch[1]) ||
-      blockedNames.has(sClean) ||
+      blockedNames.has(sDecoded) ||
+      blockedNames.has(sMapped) ||
       blockedNames.has(tMatch[1]) ||
-      blockedNames.has(tClean) ||
-      isNoisyScratchEntityName(sClean) ||
-      isNoisyScratchEntityName(tClean)
+      blockedNames.has(tDecoded) ||
+      blockedNames.has(tMapped) ||
+      isNoisyScratchEntityName(sMapped) ||
+      isNoisyScratchEntityName(tMapped)
     ) {
       return "";
     }
-    return full
-      .replace(/\bsource="([^"]*)"/i, `source="${sClean}"`)
-      .replace(/\btarget="([^"]*)"/i, `target="${tClean}"`);
+    const updatedAttrs = attrs
+      .replace(/\bsource="([^"]*)"/i, `source="${unescapeNestedXmlAttr(sMapped)}"`)
+      .replace(/\btarget="([^"]*)"/i, `target="${unescapeNestedXmlAttr(tMapped)}"`);
+    return body === null
+      ? `<relationship${updatedAttrs}/>`
+      : `<relationship${updatedAttrs}>${body}</relationship>`;
+  };
+
+  // Clean <entity .../> and <entity ...>...</entity> tags and filter out scratch/hallucination entities
+  let cleaned = String(xml || "").replace(/<entity(?=\s)([^>]*?)\/>/gi, (full, attrs) => {
+    const res = sanitizeEntity(attrs, null);
+    return res === null ? full : res;
   });
+
+  cleaned = cleaned.replace(
+    /<entity(?=\s)([^>]*[^/])>([\s\S]*?)<\/entity>/gi,
+    (full, attrs, body) => {
+      const res = sanitizeEntity(attrs, body);
+      return res === null ? full : res;
+    }
+  );
+
+  // Clean <relationship .../> and <relationship ...>...</relationship> tags and drop blocked edges
+  cleaned = cleaned.replace(/<relationship(?=\s)([^>]*?)\/>/gi, (full, attrs) => {
+    const res = sanitizeRelationship(attrs, null);
+    return res === null ? full : res;
+  });
+
+  cleaned = cleaned.replace(
+    /<relationship(?=\s)([^>]*[^/])>([\s\S]*?)<\/relationship>/gi,
+    (full, attrs, body) => {
+      const res = sanitizeRelationship(attrs, body);
+      return res === null ? full : res;
+    }
+  );
 
   return cleaned;
 }
@@ -139,6 +218,66 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY || envVars.GEMINI_API_KEY || "";
 
 const TARGETS = [
   {
+    name: "Gemini 3.8 Flash (Google AI Studio)",
+    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    headers: {
+      Authorization: `Bearer ${GEMINI_KEY}`,
+      "Content-Type": "application/json"
+    },
+    model: "gemini-3.8-flash",
+    timeoutMs: 15000
+  },
+  {
+    name: "Gemini Flash Latest (Google AI Studio - Accuracy Tier)",
+    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    headers: {
+      Authorization: `Bearer ${GEMINI_KEY}`,
+      "Content-Type": "application/json"
+    },
+    model: "gemini-flash-latest",
+    timeoutMs: 15000
+  },
+  {
+    name: "Groq (GPT-OSS 120B - Deep Reasoning)",
+    url: "https://api.groq.com/openai/v1/chat/completions",
+    headers: {
+      Authorization: `Bearer ${GROQ_KEY}`,
+      "Content-Type": "application/json"
+    },
+    model: "openai/gpt-oss-120b",
+    timeoutMs: 15000
+  },
+  {
+    name: "Gemma 4 26B MoE (Google High-Quota Fast Pool)",
+    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    headers: {
+      Authorization: `Bearer ${GEMINI_KEY}`,
+      "Content-Type": "application/json"
+    },
+    model: "gemma-4-26b-a4b-it",
+    timeoutMs: 15000
+  },
+  {
+    name: "Gemini 3.1 Flash Lite (Google AI Studio)",
+    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    headers: {
+      Authorization: `Bearer ${GEMINI_KEY}`,
+      "Content-Type": "application/json"
+    },
+    model: "gemini-3.1-flash-lite-preview",
+    timeoutMs: 12000
+  },
+  {
+    name: "Gemini Flash Lite (Google AI Studio - Fast Quota)",
+    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    headers: {
+      Authorization: `Bearer ${GEMINI_KEY}`,
+      "Content-Type": "application/json"
+    },
+    model: "gemini-flash-lite-latest",
+    timeoutMs: 12000
+  },
+  {
     name: "Groq (GPT-OSS 20B - Super Fast & High Quota)",
     url: "https://api.groq.com/openai/v1/chat/completions",
     headers: {
@@ -159,56 +298,6 @@ const TARGETS = [
     timeoutMs: 12000
   },
   {
-    name: "Groq (GPT-OSS 120B - Deep Reasoning)",
-    url: "https://api.groq.com/openai/v1/chat/completions",
-    headers: {
-      Authorization: `Bearer ${GROQ_KEY}`,
-      "Content-Type": "application/json"
-    },
-    model: "openai/gpt-oss-120b",
-    timeoutMs: 15000
-  },
-  {
-    name: "Gemini Flash Lite (Google AI Studio - Fast Quota)",
-    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-    headers: {
-      Authorization: `Bearer ${GEMINI_KEY}`,
-      "Content-Type": "application/json"
-    },
-    model: "gemini-flash-lite-latest",
-    timeoutMs: 12000
-  },
-  {
-    name: "Gemini 2.5 Flash (Google AI Studio - Stable)",
-    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-    headers: {
-      Authorization: `Bearer ${GEMINI_KEY}`,
-      "Content-Type": "application/json"
-    },
-    model: "gemini-2.5-flash",
-    timeoutMs: 15000
-  },
-  {
-    name: "Gemma 4 26B MoE (Google High-Quota Fast Pool)",
-    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-    headers: {
-      Authorization: `Bearer ${GEMINI_KEY}`,
-      "Content-Type": "application/json"
-    },
-    model: "gemma-4-26b-a4b-it",
-    timeoutMs: 15000
-  },
-  {
-    name: "Gemini 3.8 Flash (Google AI Studio)",
-    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-    headers: {
-      Authorization: `Bearer ${GEMINI_KEY}`,
-      "Content-Type": "application/json"
-    },
-    model: "gemini-3.8-flash",
-    timeoutMs: 15000
-  },
-  {
     name: "Z Fold 3 (Local USB)",
     url: "http://127.0.0.1:8080/v1/chat/completions",
     headers: {
@@ -227,6 +316,55 @@ const TARGETS = [
     timeoutMs: 4000
   }
 ];
+
+const FAST_MODEL_ORDER = [
+  "gemini-3.1-flash-lite-preview",
+  "gemini-flash-lite-latest",
+  "openai/gpt-oss-20b",
+  "gemma-4-26b-a4b-it",
+  "qwen/qwen3.8-27b",
+  "gemini-flash-latest",
+  "gemini-3.8-flash",
+  "openai/gpt-oss-120b",
+  "qwen2.5-3b-instruct"
+];
+
+const ACCURACY_MODEL_ORDER = [
+  "gemini-3.8-flash",
+  "gemini-flash-latest",
+  "openai/gpt-oss-120b",
+  "gemma-4-26b-a4b-it",
+  "gemini-3.1-flash-lite-preview",
+  "gemini-flash-lite-latest",
+  "openai/gpt-oss-20b",
+  "qwen/qwen3.8-27b",
+  "qwen2.5-3b-instruct"
+];
+
+/**
+ * Selects and orders target tiers based on task format:
+ * - "observation" / "any": fast, high-quota tier order first
+ * - "summary" / "graph" / "entities": accuracy-first tier order
+ */
+function selectTargetsForFormat(expectedFormat = "any", targets = TARGETS) {
+  const list = Array.isArray(targets) ? [...targets] : [...TARGETS];
+  const normalized = String(expectedFormat || "any")
+    .trim()
+    .toLowerCase()
+    .replace(/^<|>$/g, "");
+  const useAccuracyTier =
+    normalized === "summary" ||
+    normalized === "graph" ||
+    normalized === "entities" ||
+    normalized === "temporal_graph";
+  const order = useAccuracyTier ? ACCURACY_MODEL_ORDER : FAST_MODEL_ORDER;
+  const rankMap = new Map(order.map((model, idx) => [model, idx]));
+  return list.sort((a, b) => {
+    const ra = rankMap.has(a?.model) ? rankMap.get(a.model) : Number.MAX_SAFE_INTEGER;
+    const rb = rankMap.has(b?.model) ? rankMap.get(b.model) : Number.MAX_SAFE_INTEGER;
+    return ra - rb;
+  });
+}
 
 const cooldownUntil = new Map();
 
@@ -311,6 +449,9 @@ function inspectAndCleanResponse(rawText, expectedFormat = "any") {
       return { ok: false, reason: "empty_choices" };
     }
 
+    const fmt = String(expectedFormat || "any").trim().toLowerCase().replace(/^<|>$/g, "");
+    const normalizedFormat = fmt === "entities" || fmt === "temporal_graph" ? "graph" : fmt;
+
     for (const c of obj.choices) {
       const finishReason = c?.finish_reason;
       const rawContent = typeof c?.message?.content === "string" ? c.message.content : "";
@@ -336,36 +477,36 @@ function inspectAndCleanResponse(rawText, expectedFormat = "any") {
       }
 
       if (
-        expectedFormat === "summary" &&
-        text.includes("<summary>") &&
+        normalizedFormat === "summary" &&
+        /<summary>/i.test(text) &&
         !/<\/summary>/i.test(text)
       ) {
         return { ok: false, reason: "unclosed_summary_xml" };
       }
       if (
-        expectedFormat === "observation" &&
-        text.includes("<observation>") &&
+        normalizedFormat === "observation" &&
+        /<observation>/i.test(text) &&
         !/<\/observation>/i.test(text)
       ) {
         return { ok: false, reason: "unclosed_observation_xml" };
       }
       if (
-        expectedFormat === "graph" &&
-        text.includes("<entities>") &&
+        normalizedFormat === "graph" &&
+        /<entities>/i.test(text) &&
         !/<\/relationships>/i.test(text)
       ) {
         return { ok: false, reason: "unclosed_graph_xml" };
       }
 
-      if (text.includes("<summary>")) {
+      if (/<summary>/i.test(text)) {
         const m = text.match(/<summary>[\s\S]*?<\/summary>/i);
         if (m) text = m[0];
-        text = escapeXmlBareAmpersands(text);
-      } else if (text.includes("<observation>")) {
+        text = sanitizeObservationOrSummaryXml(escapeXmlBareAmpersands(text));
+      } else if (/<observation>/i.test(text)) {
         const m = text.match(/<observation>[\s\S]*?<\/observation>/i);
         if (m) text = m[0];
-        text = escapeXmlBareAmpersands(text);
-      } else if (text.includes("<entities>")) {
+        text = sanitizeObservationOrSummaryXml(escapeXmlBareAmpersands(text));
+      } else if (/<entities>/i.test(text)) {
         const m = text.match(/<entities>[\s\S]*?<\/relationships>/i);
         if (m) text = m[0];
         text = sanitizeGraphXmlOutput(escapeXmlBareAmpersands(text));
@@ -392,6 +533,247 @@ function escapeXml(str) {
     .trim();
 }
 
+function detectExpectedFormat(systemMsg = "") {
+  const sys = String(systemMsg || "");
+  if (
+    sys.includes("<summary>") ||
+    sys.includes("session summarizer") ||
+    sys.includes("merging multiple partial summaries")
+  ) {
+    return "summary";
+  }
+  if (sys.includes("<observation>")) {
+    return "observation";
+  }
+  if (sys.includes("knowledge graph extraction") || sys.includes("<entities>")) {
+    return "graph";
+  }
+  return "any";
+}
+
+function normalizeTextLinesPreserveNewlines(text) {
+  return String(text || "")
+    .split("\n")
+    .map((line) =>
+      line
+        .normalize("NFKC")
+        .replace(/[\u2010-\u2015\u2212\u00ad]/g, "-")
+        .replace(/[\u200b-\u200d\ufeff]/g, "")
+    )
+    .join("\n");
+}
+
+function stripUrlsForExtraction(text) {
+  return String(text || "")
+    .replace(/file:\/\/\//gi, "/")
+    .replace(/https?:\/\/[^\s"'`<>()[\]{}]+/gi, " ");
+}
+
+function addCleanFileCandidate(files, seenLower, rawCandidate, limit, allowBareFilename = false) {
+  if (files.length >= limit) return;
+  const candidate = normalizeUnicodeDashes(
+    String(rawCandidate || "")
+      .trim()
+      .replace(/^["'`(<[{]+/, "")
+      .replace(/[.,;:!?)\]}'">`]+$/, "")
+  );
+  if (!candidate || candidate.length < 3 || candidate.length > 260) return;
+  if (/^(?:none|null|undefined|n\/a|na|true|false)$/i.test(candidate)) return;
+  if (/^\/[^/]+\/[gimsuvy]*$/.test(candidate)) return;
+  if (allowBareFilename) {
+    if (!candidate.includes("/") && !/^[a-zA-Z0-9_.-]+\.[a-zA-Z][a-zA-Z0-9]{0,9}$/.test(candidate)) {
+      return;
+    }
+  } else if (!candidate.includes("/")) {
+    return;
+  }
+  if (isNoisyScratchEntityName(candidate)) return;
+  const key = candidate.toLowerCase();
+  if (seenLower.has(key)) return;
+  seenLower.add(key);
+  files.push(candidate);
+}
+
+function extractCleanFilesFromText(text, maxFiles = 12) {
+  const normalizedText = normalizeTextLinesPreserveNewlines(text);
+  const files = [];
+  const seenLower = new Set();
+
+  // 1. Explicit "Files:" lines (comma-separated, supports bare filenames like install.sh)
+  for (const m of normalizedText.matchAll(/(?:^|\n)\s*Files:\s*([^\n]+)/gi)) {
+    for (const part of m[1].split(",")) {
+      addCleanFileCandidate(files, seenLower, part, maxFiles, true);
+    }
+  }
+
+  let working = stripUrlsForExtraction(normalizedText);
+
+  // 2. Quoted JSON / key-value file fields (mask matched values so substrings aren't re-matched)
+  working = working.replace(
+    /(?:"(?:file_?path|target_?file|source_?file|path|file|files)"|file_?path|target_?file|source_?file|path|file)\s*[:=]\s*["']([^"'\n]+)["']/gi,
+    (full, val) => {
+      addCleanFileCandidate(files, seenLower, val, maxFiles, true);
+      return " ";
+    }
+  );
+
+  // 3. Absolute or home-relative paths (e.g. /Users/.../app.mjs or ~/.agentmemory/graph.json)
+  working = working.replace(
+    /(?:^|[\s"'`(\[:=,])((?:~\/|\/[a-zA-Z0-9._@-]+\/)[a-zA-Z0-9._/@-]+)/g,
+    (full, candidate) => {
+      addCleanFileCandidate(files, seenLower, candidate, maxFiles, false);
+      return full.slice(0, full.length - candidate.length) + " ";
+    }
+  );
+
+  // 4. Relative paths with file extension (e.g. router/smart-router.mjs)
+  for (const m of working.matchAll(
+    /(?:^|[\s"'`(\[:=,])((?:\.\.?\/)?[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)+\.[a-zA-Z][a-zA-Z0-9]{0,9})/g
+  )) {
+    addCleanFileCandidate(files, seenLower, m[1], maxFiles, false);
+  }
+
+  return files;
+}
+
+const GENERIC_CONCEPT_SKIP = new Set([
+  "file_path",
+  "target_file",
+  "source_file",
+  "tool_name",
+  "tool_input",
+  "tool_output",
+  "user_prompt",
+  "assistant_response",
+  "finish_reason",
+  "max_tokens",
+  "content-type",
+  "application-json",
+  "utf-8",
+  "post_tool_use",
+  "pre_tool_use",
+  "prompt_submit",
+  "session_start",
+  "session_end",
+  "pre_compact",
+  "subagent_start",
+  "subagent_stop",
+  "task_completed",
+  "operation"
+]);
+
+const FILE_EXT_CONCEPT_REGEX =
+  /\.(?:mjs|cjs|js|jsx|ts|tsx|py|go|rs|java|rb|php|sh|zsh|md|txt|log|json|yaml|yml|toml|xml|html|css|sql|env|lock|plist|png|jpg|jpeg|webp|pdf)$/i;
+
+const KNOWN_DOMAIN_CONCEPTS = [
+  [/\bAgentMemory\b/i, "AgentMemory"],
+  [/\bSmart\s+AI\s+Router\b/i, "Smart AI Router"],
+  [/\bSmart\s+Router\b/i, "Smart Router"],
+  [/\bNode\.js\b/i, "Node.js"],
+  [/\bTypeScript\b/i, "TypeScript"],
+  [/\bJavaScript\b/i, "JavaScript"],
+  [/\bGraphQL\b/i, "GraphQL"],
+  [/\bDocker\b/i, "Docker"],
+  [/\bRedis\b/i, "Redis"],
+  [/\bReact\b/i, "React"],
+  [/\bGemini\b/i, "Gemini"],
+  [/\bGemma\b/i, "Gemma"],
+  [/\bGroq\b/i, "Groq"],
+  [/\bOllama\b/i, "Ollama"],
+  [/\bXML\b/, "XML"],
+  [/\bJSON\b/, "JSON"],
+  [/\bHTTP\b/, "HTTP"],
+  [/\bESM\b/, "ESM"],
+  [/\bCLI\b/, "CLI"],
+  [/\bAPI\b/, "API"],
+  [/\bMCP\b/, "MCP"],
+  [/\bSQL\b/, "SQL"],
+  [/\bKV\b/, "KV"],
+  [/\bNFKC\b/, "NFKC"],
+  [/\bUTF-16\b/i, "UTF-16"]
+];
+
+function addCleanConceptCandidate(
+  concepts,
+  seenLower,
+  rawCandidate,
+  limit,
+  { allowFileExtension = false } = {}
+) {
+  if (concepts.length >= limit) return;
+  let c = normalizeUnicodeDashes(String(rawCandidate || "").replace(/^["'`]+|["'`]+$/g, ""));
+  if (CJK_CANONICAL_MAP.has(c)) c = CJK_CANONICAL_MAP.get(c);
+  if (!c || c.length < 2 || c.length > 60) return;
+  if (/^\d+$/.test(c)) return;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(c)) return;
+  if (/^[0-9a-f]{4,}(?:-[0-9a-f]{4,})+$/i.test(c)) return;
+  if (/^[0-9a-f]{8,}$/i.test(c)) return;
+  if (c.startsWith("/") || c.startsWith("~/") || c.startsWith("./") || c.startsWith("../")) return;
+  if (!allowFileExtension && (c.includes("/") || FILE_EXT_CONCEPT_REGEX.test(c))) return;
+  if (GENERIC_CONCEPT_SKIP.has(c.toLowerCase())) return;
+  if (isNoisyScratchEntityName(c)) return;
+  const key = c.toLowerCase();
+  if (seenLower.has(key)) return;
+  seenLower.add(key);
+  concepts.push(c);
+}
+
+function extractCleanConceptsFromText(
+  text,
+  { toolName = "", maxConcepts = 8, fallbackConcepts = [] } = {}
+) {
+  const normalizedText = normalizeTextLinesPreserveNewlines(text);
+  const concepts = [];
+  const seenLower = new Set();
+
+  // 1. Explicit "Concepts:" lines
+  for (const m of normalizedText.matchAll(/(?:^|\n)\s*Concepts:\s*([^\n]+)/gi)) {
+    for (const part of m[1].split(",")) {
+      addCleanConceptCandidate(concepts, seenLower, part, maxConcepts, { allowFileExtension: true });
+    }
+  }
+
+  // 2. Strip metadata headers, URLs, and noisy scratch paths before scanning content keywords
+  const stripped = stripUrlsForExtraction(normalizedText)
+    .replace(/^(?:Timestamp|Hook|Tool|Files|Concepts):[^\n]*$/gim, " ")
+    .replace(/(?:~\/|\/[a-zA-Z0-9._@-]+\/)[a-zA-Z0-9._/@-]+/g, " ");
+
+  // 3. Backticked technical identifiers
+  for (const m of stripped.matchAll(/`([^`\n]{2,48})`/g)) {
+    const token = m[1].trim();
+    if (token.split(/\s+/).length <= 3) {
+      addCleanConceptCandidate(concepts, seenLower, token, maxConcepts);
+    }
+  }
+
+  // 4. Compound technical identifiers (kebab-case / snake_case)
+  for (const m of stripped.matchAll(/\b([a-zA-Z][a-zA-Z0-9]*(?:[-_][a-zA-Z0-9]+)+)\b/g)) {
+    addCleanConceptCandidate(concepts, seenLower, m[1], maxConcepts);
+  }
+
+  // 5. Well-known coding / architecture domain terms present in text
+  for (const [pattern, label] of KNOWN_DOMAIN_CONCEPTS) {
+    if (concepts.length >= maxConcepts) break;
+    if (pattern.test(stripped)) {
+      addCleanConceptCandidate(concepts, seenLower, label, maxConcepts, { allowFileExtension: true });
+    }
+  }
+
+  // 6. Tool name if explicitly provided and non-generic
+  if (toolName && concepts.length < maxConcepts) {
+    addCleanConceptCandidate(concepts, seenLower, toolName, maxConcepts);
+  }
+
+  // 7. Optional caller-supplied fallback concepts (only for <summary>, never fake <observation> defaults)
+  if (concepts.length === 0 && Array.isArray(fallbackConcepts)) {
+    for (const fc of fallbackConcepts) {
+      addCleanConceptCandidate(concepts, seenLower, fc, maxConcepts);
+    }
+  }
+
+  return concepts;
+}
+
 function buildLocalExtractiveFallback(parsed) {
   const messages = Array.isArray(parsed?.messages) ? parsed.messages : [];
   const systemMsg = messages.find((m) => m.role === "system")?.content || "";
@@ -400,34 +782,21 @@ function buildLocalExtractiveFallback(parsed) {
       .filter((m) => m.role === "user")
       .map((m) => m.content)
       .join("\n") || "";
+  const format = detectExpectedFormat(systemMsg);
 
   let content = "";
 
-  if (
-    systemMsg.includes("<summary>") ||
-    systemMsg.includes("session summarizer") ||
-    systemMsg.includes("merging multiple partial summaries")
-  ) {
+  if (format === "summary") {
     const titles = [];
     for (const m of userMsg.matchAll(/(?:\[\d+\]\s+[a-z_]+:\s+|Title:\s+)([^\n]+)/gi)) {
-      const t = m[1].trim();
+      const t = normalizeUnicodeDashes(m[1]);
       if (t && t.length > 3 && !titles.includes(t)) titles.push(t);
     }
-    const files = [];
-    for (const m of userMsg.matchAll(
-      /(?:Files:\s*|-\s*)(\/[^\s,\n]+|[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_./-]+\.[a-zA-Z0-9]+)/g
-    )) {
-      const f = m[1].trim();
-      if (f && !files.includes(f) && !isNoisyScratchEntityName(f)) files.push(f);
-    }
-    const concepts = [];
-    for (const m of userMsg.matchAll(/Concepts:\s*([^\n]+)/gi)) {
-      for (const c of m[1].split(",")) {
-        const clean = c.trim();
-        if (clean && !concepts.includes(clean) && !isNoisyScratchEntityName(clean))
-          concepts.push(clean);
-      }
-    }
+    const files = extractCleanFilesFromText(userMsg, 12);
+    const concepts = extractCleanConceptsFromText(userMsg, {
+      maxConcepts: 8,
+      fallbackConcepts: ["session-summary", "agentmemory", "system-configuration"]
+    });
 
     const mainTitle = sliceHeadSurrogateSafe(
       titles[titles.length - 1] || titles[0] || "Coding & System Optimization Session",
@@ -446,16 +815,12 @@ function buildLocalExtractiveFallback(parsed) {
     )
       .map((d) => `    <decision>${escapeXml(sliceHeadSurrogateSafe(d, 140))}</decision>`)
       .join("\n");
-    const fileList = (files.slice(0, 12).length ? files.slice(0, 12) : ["~/.agentmemory/.env"])
-      .map((f) => `    <file>${escapeXml(f)}</file>`)
-      .join("\n");
-    const conceptList = (
-      concepts.slice(0, 8).length
-        ? concepts.slice(0, 8)
-        : ["session-summary", "agentmemory", "system-configuration"]
-    )
-      .map((c) => `    <concept>${escapeXml(c)}</concept>`)
-      .join("\n");
+    const filesXml = files.length
+      ? `<files>\n${files.map((f) => `    <file>${escapeXml(f)}</file>`).join("\n")}\n  </files>`
+      : `<files></files>`;
+    const conceptsXml = concepts.length
+      ? `<concepts>\n${concepts.map((c) => `    <concept>${escapeXml(c)}</concept>`).join("\n")}\n  </concepts>`
+      : `<concepts></concepts>`;
 
     content = `<summary>
   <title>${escapeXml(mainTitle)}</title>
@@ -463,21 +828,16 @@ function buildLocalExtractiveFallback(parsed) {
   <decisions>
 ${decisionList}
   </decisions>
-  <files>
-${fileList}
-  </files>
-  <concepts>
-${conceptList}
-  </concepts>
+  ${filesXml}
+  ${conceptsXml}
 </summary>`;
-  } else if (systemMsg.includes("<observation>")) {
-    const toolMatch = /Tool:\s*([^\n]+)/i.exec(userMsg);
-    const hookMatch = /Hook:\s*([^\n]+)/i.exec(userMsg);
-    const toolName = toolMatch
-      ? toolMatch[1].trim()
-      : hookMatch
-      ? hookMatch[1].trim()
-      : "operation";
+  } else if (format === "observation") {
+    const normalizedUserMsg = normalizeTextLinesPreserveNewlines(userMsg);
+    const toolMatch = /Tool:\s*([^\n]+)/i.exec(normalizedUserMsg);
+    const hookMatch = /Hook:\s*([^\n]+)/i.exec(normalizedUserMsg);
+    const toolName = normalizeUnicodeDashes(
+      toolMatch ? toolMatch[1] : hookMatch ? hookMatch[1] : "operation"
+    );
     let obsType = "other";
     if (/read|view/i.test(toolName)) obsType = "file_read";
     else if (/write|create/i.test(toolName)) obsType = "file_write";
@@ -486,8 +846,8 @@ ${conceptList}
     else if (/search|grep|find/i.test(toolName)) obsType = "search";
     else if (/prompt/i.test(toolName)) obsType = "conversation";
 
-    const firstLine =
-      userMsg
+    const firstLine = normalizeUnicodeDashes(
+      normalizedUserMsg
         .split("\n")
         .map((l) => l.trim())
         .find(
@@ -496,12 +856,26 @@ ${conceptList}
             !l.startsWith("Timestamp:") &&
             !l.startsWith("Hook:") &&
             !l.startsWith("Tool:")
-        ) || `Executed ${toolName}`;
+        ) || `Executed ${toolName}`
+    );
     const title = sliceHeadSurrogateSafe(`${toolName}: ${firstLine}`, 75);
     const narrative = `Executed ${toolName} during coding session (${sliceHeadSurrogateSafe(
       firstLine,
       120
     )}). Output was captured and indexed for session memory retrieval.`;
+
+    const files = extractCleanFilesFromText(userMsg, 8);
+    const concepts = extractCleanConceptsFromText(userMsg, {
+      toolName: toolMatch || hookMatch ? toolName : "",
+      maxConcepts: 6
+    });
+
+    const conceptsXml = concepts.length
+      ? `<concepts>\n${concepts.map((c) => `    <concept>${escapeXml(c)}</concept>`).join("\n")}\n  </concepts>`
+      : `<concepts></concepts>`;
+    const filesXml = files.length
+      ? `<files>\n${files.map((f) => `    <file>${escapeXml(f)}</file>`).join("\n")}\n  </files>`
+      : `<files></files>`;
 
     content = `<observation>
   <type>${obsType}</type>
@@ -512,13 +886,8 @@ ${conceptList}
     <fact>Processed via ${escapeXml(toolName)}</fact>
   </facts>
   <narrative>${escapeXml(narrative)}</narrative>
-  <concepts>
-    <concept>${escapeXml(toolName)}</concept>
-    <concept>agent-workflow</concept>
-  </concepts>
-  <files>
-    <file>~/.agentmemory/.env</file>
-  </files>
+  ${conceptsXml}
+  ${filesXml}
   <importance>5</importance>
 </observation>`;
   } else {
@@ -550,19 +919,34 @@ ${conceptList}
 
 const server = http.createServer(async (req, res) => {
   if (req.method !== "POST" || !req.url.endsWith("/chat/completions")) {
+    const fastChain = [
+      ...selectTargetsForFormat("observation").map((t) => `${t.name} [${t.model}]`),
+      "Local Extractive Fallback (Zero-Fail Safety Net)"
+    ];
+    const accuracyChain = [
+      ...selectTargetsForFormat("summary").map((t) => `${t.name} [${t.model}]`),
+      "Local Extractive Fallback (Zero-Fail Safety Net)"
+    ];
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(
       JSON.stringify({
         status: "ok",
-        version: "3.0",
+        version: "4.0",
         features: [
+          "task-aware-model-tiering (fast-observation vs accuracy-summary-graph)",
           "surrogate-safe-truncation (#1598)",
           "max_tokens-truncated-reply-failover (#1495)",
           "zero-token-hallucination-and-scratch-noise-gate",
+          "observation-summary-xml-sanitization",
           "nested-xml-entity-unescaping",
-          "direct-graph-xml-zero-token-passthrough"
+          "direct-graph-xml-zero-token-passthrough",
+          "maintenance-lock-graph-freeze"
         ],
-        chain: [...TARGETS.map((t) => t.name), "Local Extractive Fallback (Zero-Fail Safety Net)"]
+        chains: {
+          fast: fastChain,
+          accuracy: accuracyChain
+        },
+        chain: accuracyChain
       })
     );
     return;
@@ -589,20 +973,9 @@ const server = http.createServer(async (req, res) => {
     .map((m) => m.content || "")
     .join("\n");
 
-  const isSummarize =
-    systemMsg.includes("<summary>") ||
-    systemMsg.includes("session summarizer") ||
-    systemMsg.includes("merging multiple partial summaries");
-  const isObservation = systemMsg.includes("<observation>");
-  const isGraphExtraction =
-    systemMsg.includes("knowledge graph extraction") || systemMsg.includes("<entities>");
-  const expectedFormat = isSummarize
-    ? "summary"
-    : isObservation
-    ? "observation"
-    : isGraphExtraction
-    ? "graph"
-    : "any";
+  const expectedFormat = detectExpectedFormat(systemMsg);
+  const isSummarize = expectedFormat === "summary";
+  const isGraphExtraction = expectedFormat === "graph";
 
   const isMaintenanceLocked = fs.existsSync(MAINTENANCE_LOCK_PATH);
 
@@ -656,7 +1029,9 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  for (const target of TARGETS) {
+  const selectedTargets = selectTargetsForFormat(expectedFormat);
+
+  for (const target of selectedTargets) {
     if (isCoolingDown(target)) continue;
     try {
       const payload = { ...sanitized, model: target.model };
@@ -709,6 +1084,23 @@ const server = http.createServer(async (req, res) => {
   res.end(fallbackData);
 });
 
-server.listen(PORT, "127.0.0.1", () => {
-  console.log(`Smart AI Router v3.0 listening on http://127.0.0.1:${PORT}`);
-});
+const isMain =
+  Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  server.listen(PORT, "127.0.0.1", () => {
+    console.log(`Smart AI Router v4.0 listening on http://127.0.0.1:${PORT}`);
+  });
+}
+
+export {
+  normalizeUnicodeDashes,
+  isNoisyScratchEntityName,
+  sanitizeObservationOrSummaryXml,
+  sanitizeGraphXmlOutput,
+  inspectAndCleanResponse,
+  buildLocalExtractiveFallback,
+  selectTargetsForFormat,
+  TARGETS,
+  FAST_MODEL_ORDER,
+  ACCURACY_MODEL_ORDER
+};

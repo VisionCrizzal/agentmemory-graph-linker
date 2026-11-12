@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
- * AgentMemory Knowledge Graph Linker, Beautifier, Cleaner, Deduplicator & Healer (v3.1)
- * Zero-Token / Lightweight-Model Graph & RAM Optimization Toolkit for Antigravity
+ * AgentMemory Knowledge Graph Linker, Beautifier, Cleaner, Deduplicator & Healer (v4.0)
+ * Hybrid Neuro-Symbolic / Verification-First & Zero-Token Graph Toolkit for Antigravity
  *
  * Usage:
  *   node graph-linker.mjs --status
+ *   node graph-linker.mjs --verify-json [--strict]
  *   node graph-linker.mjs --lock   [<reason>]
  *   node graph-linker.mjs --unlock
  *   node graph-linker.mjs --audit  [--days 14]
@@ -20,12 +21,59 @@
  *   node graph-linker.mjs --dump
  *   node graph-linker.mjs --apply '<json_relations_array_or_filepath>'
  *   node graph-linker.mjs --auto
+ *   node graph-linker.mjs --simulate-budget [--limit N] [--target-reads N]
+ *   node graph-linker.mjs --compact-edges [--apply] [--target-reads N] [--limit N]
+ *   node graph-linker.mjs --suggest-merges [--limit N] [--min-score S]
+ *   node graph-linker.mjs --merge-plan '<json_or_file>' [--dry-run]
+ *   node graph-linker.mjs --suggest-links [--limit N]
+ *   node graph-linker.mjs --apply-temporal '<json_or_file>' [--dry-run]
+ *   node graph-linker.mjs --help
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import {
+  runBudgetSimulation,
+  compactRedundantEdges
+} from "./edge-compactor.mjs";
+import {
+  findSemanticDuplicateCandidates,
+  applySemanticMergePlan,
+  buildSemanticLinkBatch,
+  applyTemporalLinks
+} from "./semantic-planner.mjs";
+
+const VERSION = "4.0";
+
+const USAGE_TEXT = `AgentMemory Graph Linker v${VERSION}
+Usage:
+  node graph-linker.mjs --status
+  node graph-linker.mjs --verify-json [--strict]
+  node graph-linker.mjs --lock   [<reason>]
+  node graph-linker.mjs --unlock
+  node graph-linker.mjs --audit  [--days 14]
+  node graph-linker.mjs --dedup
+  node graph-linker.mjs --rename "<old_name_or_id>" "<new_name>" [--type <new_type>]
+  node graph-linker.mjs --prune  [--days 14] [--include-stale] [--include-hallucinations]
+  node graph-linker.mjs --restore "<node_name_or_id|--last|--list>"
+  node graph-linker.mjs --optimize-ram
+  node graph-linker.mjs --beautify
+  node graph-linker.mjs --delete "<node_name_or_id>" ["<more_names_or_ids>..."]
+  node graph-linker.mjs --heal   (alias: --drain)
+  node graph-linker.mjs --logs   [--reset-cursor]
+  node graph-linker.mjs --dump
+  node graph-linker.mjs --apply '<json_relations_array_or_filepath>'
+  node graph-linker.mjs --auto
+  node graph-linker.mjs --simulate-budget [--limit N] [--target-reads N]
+  node graph-linker.mjs --compact-edges [--apply] [--target-reads N] [--limit N]
+  node graph-linker.mjs --suggest-merges [--limit N] [--min-score S]
+  node graph-linker.mjs --merge-plan '<json_or_file>' [--dry-run]
+  node graph-linker.mjs --suggest-links [--limit N]
+  node graph-linker.mjs --apply-temporal '<json_or_file>' [--dry-run]
+  node graph-linker.mjs --help`;
 
 const HOME = os.homedir();
 const AGENTMEMORY_DIR = process.env.AGENTMEMORY_DATA_DIR || path.join(HOME, ".agentmemory");
@@ -757,12 +805,42 @@ function isXmlEntityCorrupted(name) {
   return /&(?:quot|lt|gt|amp|apos|#\d+|#x[\da-f]+);/i.test(String(name || ""));
 }
 
+const UNICODE_HYPHENS_REGEX = /[\u2010\u2011\u2012\u2212\u00ad]/g;
+const UNICODE_ALL_DASHES_REGEX = /[\u2010-\u2015\u2212\u00ad]/g;
+const ZERO_WIDTH_REGEX = /[\u200b-\u200d\ufeff]/g;
+
+function normalizeSoftHyphens(name) {
+  return String(name || "")
+    .normalize("NFKC")
+    .replace(UNICODE_HYPHENS_REGEX, "-")
+    .replace(ZERO_WIDTH_REGEX, "")
+    .replace(/\s+/g, " ")
+    .replace(/\\+$/g, "")
+    .trim();
+}
+
+function normalizeUnicodeGraphKey(name) {
+  return String(name || "")
+    .normalize("NFKC")
+    .replace(UNICODE_ALL_DASHES_REGEX, "-")
+    .replace(ZERO_WIDTH_REGEX, "")
+    .replace(/\s+/g, " ")
+    .replace(/\\+$/g, "")
+    .trim()
+    .toLowerCase();
+}
+
 function isTransientScratchNode(node) {
-  const nm = String(node.name || "");
+  const nm = normalizeSoftHyphens(node?.name || "");
+  if (!nm) return true;
   if (
-    nm.includes("/.system_generated/tasks/") ||
-    nm.includes("/.system_generated/steps/") ||
-    nm.includes("/.user_uploaded/media_") ||
+    nm.includes("/.system_generated/") ||
+    nm.includes("/.user_uploaded/") ||
+    /^media_\d+_[0-9a-f]+\.[a-z0-9]+$/i.test(nm) ||
+    /^task-\d+\.log$/i.test(nm) ||
+    /^steps\/\d+\/output\.txt$/i.test(nm) ||
+    /^obs_[a-z0-9_]+$/i.test(nm) ||
+    /^cap_[a-z0-9_]+$/i.test(nm) ||
     nm.startsWith("/tmp/") ||
     nm.startsWith("/private/tmp/") ||
     nm.includes("/var/folders/") ||
@@ -799,14 +877,16 @@ function buildDeduplicationPlan(allNodes, degreeMap, fixedNodeIds) {
 
   for (const node of allNodes) {
     if (!node || !node.id || !node.name) continue;
-    const unescaped = unescapeXml(node.name).replace(/\\+$/g, "").trim();
+    const rawUnescaped = unescapeXml(node.name).replace(/\\+$/g, "").trim();
+    const unescaped = normalizeSoftHyphens(rawUnescaped);
+    const normKey = normalizeUnicodeGraphKey(rawUnescaped);
     if (!unescaped) continue;
 
     let groupKey;
     let suggestedCanonicalName = unescaped;
 
     if (node.type === "error") {
-      const fp = getErrorFingerprint(node);
+      const fp = getErrorFingerprint({ ...node, name: unescaped });
       groupKey = fp.fingerprint;
       suggestedCanonicalName = fp.canonicalName;
     } else if (
@@ -815,20 +895,21 @@ function buildDeduplicationPlan(allNodes, degreeMap, fixedNodeIds) {
     ) {
       groupKey = "person|quỳnh";
       suggestedCanonicalName = "Quỳnh";
-    } else if (CJK_CANONICAL_MAP.has(unescaped)) {
-      const canonical = CJK_CANONICAL_MAP.get(unescaped);
-      groupKey = `${node.type}|${canonical.toLowerCase()}`;
-      suggestedCanonicalName = canonical;
+    } else if (CJK_CANONICAL_MAP.has(unescaped) || CJK_CANONICAL_MAP.has(rawUnescaped)) {
+      const canonical =
+        CJK_CANONICAL_MAP.get(unescaped) || CJK_CANONICAL_MAP.get(rawUnescaped);
+      groupKey = `${node.type}|${normalizeUnicodeGraphKey(canonical)}`;
+      suggestedCanonicalName = normalizeSoftHyphens(canonical);
     } else if (
       node.type === "song" ||
       node.properties?.artist ||
       node.properties?.category === "song title" ||
-      unescaped.toLowerCase() === "hollywood tonight"
+      normKey === "hollywood tonight"
     ) {
-      groupKey = `song|${unescaped.toLowerCase()}`;
+      groupKey = `song|${normKey}`;
       suggestedCanonicalName = unescaped;
     } else {
-      groupKey = `${node.type}|${unescaped.toLowerCase()}`;
+      groupKey = `${node.type}|${normKey}`;
     }
 
     if (!groupsByKey.has(groupKey)) {
@@ -850,7 +931,14 @@ function buildDeduplicationPlan(allNodes, degreeMap, fixedNodeIds) {
     if (list.length === 1) {
       const only = list[0];
       const cleanName = group.suggestedCanonicalName;
-      if (isXmlEntityCorrupted(only.name) && cleanName !== only.name) {
+      const hasCorruptedChars =
+        isXmlEntityCorrupted(only.name) ||
+        UNICODE_HYPHENS_REGEX.test(only.name) ||
+        ZERO_WIDTH_REGEX.test(only.name) ||
+        CJK_CANONICAL_MAP.has(only.name);
+      UNICODE_HYPHENS_REGEX.lastIndex = 0;
+      ZERO_WIDTH_REGEX.lastIndex = 0;
+      if (hasCorruptedChars && cleanName !== only.name) {
         singleNodeRenames.push({
           node: only,
           oldName: only.name,
@@ -861,41 +949,45 @@ function buildDeduplicationPlan(allNodes, degreeMap, fixedNodeIds) {
     }
 
     // Score each candidate in the group to pick the best Canonical Winner:
-    // Prefer clean (non-XML-corrupted) name, prefer fixed error, prefer uppercase/TitleCase over all-lowercase, prefer higher degree, prefer song type
+    // Prefer clean (non-XML-corrupted, ASCII-hyphen) name, fixed error, TitleCase, higher degree, song type
     const scored = list.map((n) => {
       const deg = degreeMap.get(n.id) || 0;
       const corrupted = isXmlEntityCorrupted(n.name) || n.name.endsWith("\\");
+      const hasUnicodeDash =
+        /[\u2010-\u2015\u2212\u00ad\u200b-\u200d\ufeff]/.test(n.name);
       const exactCanonical = n.name === group.suggestedCanonicalName;
       const hasUpper = /[A-ZÀ-Ỹ]/.test(n.name);
       const isFixed = fixedNodeIds.has(n.id);
       const isSongType = n.type === "song";
       const score =
         (corrupted ? -1000 : 500) +
+        (hasUnicodeDash ? -200 : 150) +
         (exactCanonical ? 300 : 0) +
         (isFixed ? 200 : 0) +
         (isSongType ? 300 : 0) +
         (hasUpper ? 50 : 0) +
         deg * 5;
-      return { node: n, score, deg, corrupted };
+      return { node: n, score, deg, corrupted, hasUnicodeDash };
     });
 
     scored.sort((a, b) => b.score - a.score);
     const winner = scored[0].node;
     const duplicates = scored.slice(1).map((s) => s.node);
 
-    // Pick best display name (prefer non-corrupted node with richest casing, e.g. TikTok, CLAUDE.md, GlobalKey<FormState>)
+    // Pick best display name (prefer non-corrupted, ASCII-hyphen node with richest casing)
     let canonicalName = group.suggestedCanonicalName;
     if (group.type !== "error" && group.groupKey !== "person|quỳnh") {
       const cleanCandidates = scored
         .filter((s) => !s.corrupted)
         .sort(
           (a, b) =>
+            (a.hasUnicodeDash ? 1 : 0) - (b.hasUnicodeDash ? 1 : 0) ||
             (b.node.name.match(/[A-ZÀ-Ỹ]/g) || []).length -
-            (a.node.name.match(/[A-ZÀ-Ỹ]/g) || []).length
+              (a.node.name.match(/[A-ZÀ-Ỹ]/g) || []).length
         );
       canonicalName = cleanCandidates.length
-        ? unescapeXml(cleanCandidates[0].node.name).trim()
-        : unescapeXml(winner.name).trim();
+        ? normalizeSoftHyphens(unescapeXml(cleanCandidates[0].node.name))
+        : normalizeSoftHyphens(unescapeXml(winner.name));
     }
 
     mergeGroups.push({
@@ -1284,12 +1376,12 @@ async function executeDeduplication(engine, precomputedAudit = null) {
       }
     }
 
-    // Merge observation IDs & occurrence count onto Canonical Node
-    const mergedObsIds = new Set(canonical.sourceObservationIds || []);
+    // Merge observation IDs (bounded <= 24 to stay strictly below MAX_POSTINGS=192) & occurrence count
+    const mergedObsIds = new Set((canonical.sourceObservationIds || []).slice(0, 24));
     let totalOccurrences = Number(canonical.properties?.occurrences) || 1;
     for (const dup of duplicates) {
       for (const obsId of dup.sourceObservationIds || []) {
-        if (mergedObsIds.size < 128) mergedObsIds.add(obsId);
+        if (mergedObsIds.size < 24) mergedObsIds.add(obsId);
       }
       totalOccurrences += Number(dup.properties?.occurrences) || 1;
     }
@@ -2165,6 +2257,112 @@ function applySystemAndRamPatches(options = { tuneRamEnv: false }) {
         fileChanged = true;
       }
 
+      // Guard extractGraphHeuristics against scratch paths, unmapped CJK, Unicode hyphens, and degree-0 orphans
+      const rawHeuristicNodeFor =
+        'const nodeFor = (type, name, obsId) => {\n\t\tconst trimmed = name.trim();\n\t\tif (!trimmed) return null;';
+      const patchedHeuristicNodeFor = [
+        "const nodeFor = (type, name, obsId) => {",
+        "\t\tconst trimmed = String(name || \"\").normalize(\"NFKC\").replace(/[\\u2010\\u2011\\u2012\\u2212\\u00ad]/g, \"-\").replace(/[\\u200b-\\u200d\\ufeff]/g, \"\").replace(/\\s+/g, \" \").trim();",
+        "\t\tif (!trimmed) return null;",
+        "\t\tif (trimmed.includes(\"/.system_generated/\") || trimmed.includes(\"/.user_uploaded/\") || /^media_\\d+_[0-9a-f]+\\.[a-z0-9]+$/i.test(trimmed) || /^task-\\d+\\.log$/i.test(trimmed) || /^steps\\/\\d+\\/output\\.txt$/i.test(trimmed) || /^obs_[a-z0-9_]+$/i.test(trimmed) || /^cap_[a-z0-9_]+$/i.test(trimmed) || trimmed.startsWith(\"/tmp/\") || trimmed.startsWith(\"/private/tmp/\") || trimmed.includes(\"/var/folders/\") || trimmed === \"workspace\") return null;",
+        "\t\tif (/[\\u4e00-\\u9fff\\u3400-\\u4dbf\\u3040-\\u30ff\\uac00-\\ud7af]/.test(trimmed)) return null;"
+      ].join("\n");
+      if (content.includes(rawHeuristicNodeFor) && !content.includes("/.system_generated/")) {
+        content = content.replace(rawHeuristicNodeFor, patchedHeuristicNodeFor);
+        patches.heuristicNoiseFilter = "patched_heuristic_noise_filter";
+        fileChanged = true;
+      }
+
+      const rawHeuristicReturn =
+        '\t\tfor (let i = 0; i + 1 < fileNodes.length; i++) link(fileNodes[i], fileNodes[i + 1]);\n\t}\n\treturn {\n\t\tnodes,\n\t\tedges\n\t};';
+      const patchedHeuristicReturn = [
+        "\t\tfor (let i = 0; i + 1 < fileNodes.length; i++) link(fileNodes[i], fileNodes[i + 1]);",
+        "\t}",
+        "\tconst linkedHeuristicIds = new Set();",
+        "\tfor (const edge of edges) {",
+        "\t\tlinkedHeuristicIds.add(edge.sourceNodeId);",
+        "\t\tlinkedHeuristicIds.add(edge.targetNodeId);",
+        "\t}",
+        "\treturn {",
+        "\t\tnodes: nodes.filter((n) => linkedHeuristicIds.has(n.id)),",
+        "\t\tedges",
+        "\t};"
+      ].join("\n");
+      if (content.includes(rawHeuristicReturn)) {
+        content = content.replace(rawHeuristicReturn, patchedHeuristicReturn);
+        patches.heuristicNoOrphans = "patched_heuristic_no_orphans";
+        fileChanged = true;
+      }
+
+      // Guard mem::graph-extract against maintenance lock (except DIRECT_GRAPH_XML) and auto-extracted isolated nodes
+      const rawGraphExtractStart =
+        '\tsdk.registerFunction("mem::graph-extract", async (data) => {\n\t\tconst kv = await pinGraphState(state);\n\t\tif (!data.observations || data.observations.length === 0) return {';
+      const patchedGraphExtractStart = [
+        '\tsdk.registerFunction("mem::graph-extract", async (data) => {',
+        '\t\tconst kv = await pinGraphState(state);',
+        '\t\tif (!data.observations || data.observations.length === 0) return {',
+        '\t\t\tsuccess: false,',
+        '\t\t\terror: "No observations provided"',
+        '\t\t};',
+        '\t\tconst isDirectXml = data.observations.some((o) => o && o.title === "DIRECT_GRAPH_XML");',
+        '\t\tconst lockFile = join(process.env["AGENTMEMORY_DATA_DIR"] || join(homedir(), ".agentmemory"), "maintenance.lock");',
+        '\t\tif (!isDirectXml && existsSync(lockFile)) return { success: true, nodesAdded: 0, edgesAdded: 0, skipped: "maintenance_locked" };'
+      ].join("\n");
+      const rawGraphExtractPrefix =
+        '\tsdk.registerFunction("mem::graph-extract", async (data) => {\n\t\tconst kv = await pinGraphState(state);\n\t\tif (!data.observations || data.observations.length === 0) return {\n\t\t\tsuccess: false,\n\t\t\terror: "No observations provided"\n\t\t};';
+      if (content.includes(rawGraphExtractPrefix) && !content.includes("isDirectXml")) {
+        content = content.replace(rawGraphExtractPrefix, patchedGraphExtractStart);
+        patches.graphExtractLockGuard = "patched_graph_extract_lock";
+        fileChanged = true;
+      }
+
+      const rawParseXmlConcat =
+        '\t\t\t\tconst parsed = parseGraphXml(await provider.compress(GRAPH_EXTRACTION_SYSTEM, prompt), obsIds);\n\t\t\t\tnodes = nodes.concat(parsed.nodes);\n\t\t\t\tedges = edges.concat(parsed.edges);';
+      const patchedParseXmlConcat = [
+        "\t\t\t\tconst parsed = parseGraphXml(await provider.compress(GRAPH_EXTRACTION_SYSTEM, prompt), obsIds);",
+        "\t\t\t\tif (isDirectXml || data.allowIsolated === true) {",
+        "\t\t\t\t\tnodes = nodes.concat(parsed.nodes);",
+        "\t\t\t\t\tedges = edges.concat(parsed.edges);",
+        "\t\t\t\t} else {",
+        "\t\t\t\t\tconst linkedParsedIds = new Set();",
+        "\t\t\t\t\tfor (const edge of parsed.edges) { linkedParsedIds.add(edge.sourceNodeId); linkedParsedIds.add(edge.targetNodeId); }",
+        "\t\t\t\t\tnodes = nodes.concat(parsed.nodes.filter((n) => linkedParsedIds.has(n.id)));",
+        "\t\t\t\t\tedges = edges.concat(parsed.edges);",
+        "\t\t\t\t}"
+      ].join("\n");
+      if (content.includes(rawParseXmlConcat) && !content.includes("linkedParsedIds")) {
+        content = content.replace(rawParseXmlConcat, patchedParseXmlConcat);
+        patches.llmNoOrphans = "patched_llm_no_orphans";
+        fileChanged = true;
+      }
+
+      // Stop event::session::stopped from re-extracting old session observations on every turn
+      const rawSessionStopped =
+        '\t\ttry {\n\t\t\tconst compressed = (await kv.list(KV.observations(data.sessionId))).filter((o) => o.title);\n\t\t\tif (compressed.length > 0) fireVoid("mem::graph-extract", { observations: compressed });\n\t\t} catch (err) {';
+      const patchedSessionStopped = [
+        "\t\ttry {",
+        '\t\t\tconst lockFile = join(process.env["AGENTMEMORY_DATA_DIR"] || join(homedir(), ".agentmemory"), "maintenance.lock");',
+        "\t\t\tif (!existsSync(lockFile)) {",
+        '\t\t\t\tconst gmKey = "graph_wm:" + data.sessionId;',
+        "\t\t\t\tconst wm = await kv.get(KV.config, gmKey).catch(() => null);",
+        '\t\t\t\tconst defaultFloor = new Date(Date.now() - 10 * 60 * 1000).toISOString();',
+        '\t\t\t\tconst lastIso = typeof wm?.at === "string" ? wm.at : defaultFloor;',
+        '\t\t\t\tconst allObs = await kv.list(KV.observations(data.sessionId));',
+        '\t\t\t\tconst compressed = allObs.filter((o) => o && o.title && o.title !== "DIRECT_GRAPH_XML" && (o.compressedAt || o.createdAt || "") > lastIso);',
+        "\t\t\t\tif (compressed.length > 0) {",
+        '\t\t\t\t\tconst newestIso = compressed.reduce((acc, o) => { const ts = o.compressedAt || o.createdAt || ""; return ts > acc ? ts : acc; }, lastIso);',
+        '\t\t\t\t\tawait kv.set(KV.config, gmKey, { at: newestIso || new Date().toISOString() }).catch(() => {});',
+        '\t\t\t\t\tfireVoid("mem::graph-extract", { observations: compressed });',
+        "\t\t\t\t}",
+        "\t\t\t}",
+        "\t\t} catch (err) {"
+      ].join("\n");
+      if (content.includes(rawSessionStopped)) {
+        content = content.replace(rawSessionStopped, patchedSessionStopped);
+        patches.sessionStoppedWatermark = "patched_session_stopped_watermark";
+        fileChanged = true;
+      }
+
       if (fileChanged) {
         try {
           fs.writeFileSync(fullPath, content, "utf8");
@@ -2264,7 +2462,7 @@ async function runOptimizeRam(secret) {
       JSON.stringify(
         {
           status: "ram_optimized",
-          version: "3.1",
+          version: VERSION,
           systemPatches: patches,
           deduplication: dedupReport,
           coldGraveyardPruning: pruneReport,
@@ -2295,8 +2493,10 @@ async function runOptimizeRam(secret) {
   process.exit(0);
 }
 
-async function queryGraph(secret, limit = 500) {
-  const res = await fetch(`${BASE_URL}/agentmemory/graph/query`, {
+async function queryGraph(secret, limit = 500, opts = {}) {
+  const baseUrl = opts.baseUrl || BASE_URL;
+  const fetchImpl = opts.fetchImpl || fetch;
+  const res = await fetchImpl(`${baseUrl}/agentmemory/graph/query`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${secret}`,
@@ -2507,8 +2707,12 @@ function pickSemanticAnchor(unlinkedNode, frontAnchors, fallbackIdx) {
  * Splits relationships into safe batches so two entities with the same `name`
  * but different `type` never collide in `parseGraphXml`'s name-keyed Map.
  */
-async function applyDirectXmlLinks(secret, entities, relationships) {
+async function applyDirectXmlLinks(secret, entities, relationships, options = {}) {
   if (!relationships.length) return { success: true, edgesAdded: 0, nodesAdded: 0 };
+
+  const baseUrl = options.baseUrl || BASE_URL;
+  const fetchImpl = options.fetchImpl || fetch;
+  const preserveRelationType = Boolean(options.preserveRelationType);
 
   let totalEdgesAdded = 0;
   let totalNodesAdded = 0;
@@ -2548,15 +2752,18 @@ async function applyDirectXmlLinks(secret, entities, relationships) {
       .map(([name, type]) => `<entity type="${escapeXml(type)}" name="${escapeXml(name)}"/>`)
       .join("");
     const relsXml = batch.rels
-      .map(
-        (r) =>
-          `<relationship type="${normalizeRelation(r.type)}" source="${escapeXml(
-            r.source
-          )}" target="${escapeXml(r.target)}" weight="${r.weight || 0.9}"/>`
-      )
+      .map((r) => {
+        const rawRel = String(r.type || "related_to").toLowerCase().trim() || "related_to";
+        const relType = preserveRelationType
+          ? escapeXml(rawRel)
+          : normalizeRelation(rawRel);
+        return `<relationship type="${relType}" source="${escapeXml(
+          r.source
+        )}" target="${escapeXml(r.target)}" weight="${r.weight ?? 0.9}"/>`;
+      })
       .join("");
 
-    const res = await fetch(`${BASE_URL}/agentmemory/graph/extract`, {
+    const res = await fetchImpl(`${baseUrl}/agentmemory/graph/extract`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${secret}`,
@@ -2591,8 +2798,10 @@ async function applyDirectXmlLinks(secret, entities, relationships) {
   };
 }
 
-async function rebuildSnapshot(secret) {
-  await fetch(`${BASE_URL}/agentmemory/graph/snapshot-rebuild`, {
+async function rebuildSnapshot(secret, options = {}) {
+  const baseUrl = options.baseUrl || BASE_URL;
+  const fetchImpl = options.fetchImpl || fetch;
+  await fetchImpl(`${baseUrl}/agentmemory/graph/snapshot-rebuild`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${secret}`,
@@ -2903,7 +3112,7 @@ async function runHeal(secret) {
     JSON.stringify(
       {
         status: "healed",
-        version: "3.0",
+        version: VERSION,
         selfPatches,
         logInspector: {
           totalUnreadBytesRead: logInspector.totalUnreadBytesRead,
@@ -2916,9 +3125,10 @@ async function runHeal(secret) {
         graphIndex: {
           state: indexData.state || indexData.control?.status,
           ready: indexData.ready,
-          nodes: indexData.control?.nodes,
-          edges: indexData.control?.edges,
-          incompleteRecords: indexData.control?.incompleteRecords
+          nodes: indexData.nodes ?? indexData.control?.nodes,
+          edges: indexData.edges ?? indexData.control?.edges,
+          incompleteRecords:
+            indexData.incompleteRecords ?? indexData.control?.incompleteRecords
         },
         graphViewer: {
           viewNodes: graphState.nodes.length,
@@ -2933,6 +3143,37 @@ async function runHeal(secret) {
     )
   );
   process.exit(0);
+}
+
+function pickBalancedInViewAnchor(node, pool, projectedDegree, domainId, rrIndex) {
+  const sameDomain = pool.filter(
+    (a) =>
+      a.id !== node.id &&
+      (a.name !== node.name || a.type !== node.type) &&
+      a._domainId === domainId &&
+      (projectedDegree.get(a.id) || 0) < 18
+  );
+  const candidates = sameDomain.length
+    ? sameDomain
+    : pool.filter(
+        (a) =>
+          a.id !== node.id &&
+          (a.name !== node.name || a.type !== node.type) &&
+          (projectedDegree.get(a.id) || 0) < 18
+      );
+  const finalPool = candidates.length
+    ? candidates
+    : pool.filter((a) => a.id !== node.id && (a.name !== node.name || a.type !== node.type));
+  if (!finalPool.length) return null;
+
+  finalPool.sort(
+    (a, b) =>
+      (projectedDegree.get(a.id) || 0) - (projectedDegree.get(b.id) || 0) ||
+      a._viewIdx - b._viewIdx
+  );
+  const minDeg = projectedDegree.get(finalPool[0].id) || 0;
+  const tiedPool = finalPool.filter((a) => (projectedDegree.get(a.id) || 0) <= minDeg + 2);
+  return tiedPool[rrIndex % tiedPool.length];
 }
 
 async function runBeautify(secret) {
@@ -2952,10 +3193,27 @@ async function runBeautify(secret) {
 
   try {
     const { nodes, edges, unlinked } = await queryGraph(secret);
-    const frontAnchors = nodes.slice(0, 20);
     const nodeById = new Map(nodes.map((n) => [n.id, n]));
+    const inViewIds = new Set(nodes.map((n) => n.id));
+    const projectedDegree = new Map();
+    const annotatedNodes = [];
 
-    const entitiesMap = new Map();
+    for (let idx = 0; idx < nodes.length; idx++) {
+      const n = nodes[idx];
+      projectedDegree.set(n.id, n.degree || 0);
+      annotatedNodes.push({ ...n, _viewIdx: idx, _domainId: classifyNodeDomain(n).id });
+    }
+
+    const healthyAnchors = annotatedNodes.filter(
+      (n) => !isTransientScratchNode(n) && (n.degree || 0) >= 1 && (projectedDegree.get(n.id) || 0) < 20
+    );
+    const inViewAnchors =
+      healthyAnchors.length >= 12
+        ? healthyAnchors
+        : annotatedNodes.filter(
+            (n) => !isTransientScratchNode(n) && (projectedDegree.get(n.id) || 0) < 24
+          );
+
     const rels = [];
     const existingPairSet = new Set(
       edges.map((e) => {
@@ -2965,18 +3223,29 @@ async function runBeautify(secret) {
       })
     );
 
+    const inViewByName = new Map(nodes.map((n) => [`${n.type}|${n.name}`, n]));
+    const inViewAnyTypeByName = new Map(nodes.map((n) => [n.name, n]));
     for (const bridge of INTER_CLUSTER_BRIDGES) {
-      const pair1 = `${bridge.source}|${bridge.target}`;
-      const pair2 = `${bridge.target}|${bridge.source}`;
+      const sNode =
+        inViewByName.get(`${bridge.sourceType || "concept"}|${bridge.source}`) ||
+        inViewAnyTypeByName.get(bridge.source);
+      const tNode =
+        inViewByName.get(`${bridge.targetType || "concept"}|${bridge.target}`) ||
+        inViewAnyTypeByName.get(bridge.target);
+      if (!sNode || !tNode) continue;
+      const pair1 = `${sNode.name}|${tNode.name}`;
+      const pair2 = `${tNode.name}|${sNode.name}`;
       if (!existingPairSet.has(pair1) && !existingPairSet.has(pair2)) {
         rels.push({
-          source: bridge.source,
-          sourceType: bridge.sourceType || "concept",
-          target: bridge.target,
-          targetType: bridge.targetType || "concept",
+          source: sNode.name,
+          sourceType: sNode.type,
+          target: tNode.name,
+          targetType: tNode.type,
           type: bridge.type
         });
         existingPairSet.add(pair1);
+        projectedDegree.set(sNode.id, (projectedDegree.get(sNode.id) || 0) + 1);
+        projectedDegree.set(tNode.id, (projectedDegree.get(tNode.id) || 0) + 1);
       }
     }
 
@@ -2984,7 +3253,7 @@ async function runBeautify(secret) {
     for (const d of THEMATIC_DOMAINS) clusterCounts[d.id] = 0;
 
     console.log(
-      `🎨 [Beautify] Semantic linking ${unlinked.length} unlinked nodes to front anchors...`
+      `🎨 [Beautify] Semantic linking ${unlinked.length} unlinked nodes to balanced in-view anchors...`
     );
 
     for (let i = 0; i < unlinked.length; i++) {
@@ -2992,22 +3261,13 @@ async function runBeautify(secret) {
       const domain = classifyNodeDomain(node);
       clusterCounts[domain.id] = (clusterCounts[domain.id] || 0) + 1;
 
-      let targetAnchor = frontAnchors.find(
-        (a) => a.name === domain.anchor.name || a.name === domain.subAnchor.name
+      const targetAnchor = pickBalancedInViewAnchor(
+        node,
+        inViewAnchors,
+        projectedDegree,
+        domain.id,
+        i
       );
-      if (
-        !targetAnchor ||
-        (targetAnchor.name === node.name && targetAnchor.type === node.type)
-      ) {
-        if (
-          domain.anchor &&
-          (domain.anchor.name !== node.name || domain.anchor.type !== node.type)
-        ) {
-          targetAnchor = domain.anchor;
-        } else {
-          targetAnchor = pickSemanticAnchor(node, frontAnchors, i).anchor;
-        }
-      }
 
       if (
         targetAnchor &&
@@ -3021,21 +3281,26 @@ async function runBeautify(secret) {
           targetType: targetAnchor.type,
           type: relType
         });
+        projectedDegree.set(node.id, (projectedDegree.get(node.id) || 0) + 1);
+        projectedDegree.set(
+          targetAnchor.id,
+          (projectedDegree.get(targetAnchor.id) || 0) + 1
+        );
       }
     }
 
     if (rels.length > 0) {
       console.log(
-        `🎨 [Beautify] Injecting ${rels.length} balanced semantic relationships via DIRECT_GRAPH_XML...`
+        `🎨 [Beautify] Injecting ${rels.length} balanced in-view relationships via DIRECT_GRAPH_XML...`
       );
-      const extractRes = await applyDirectXmlLinks(
-        secret,
-        Array.from(entitiesMap.values()),
-        rels
-      );
-      console.log(
-        `🎨 [Beautify] Graph extraction completed: +${extractRes.edgesAdded} edges.`
-      );
+      const BATCH_SIZE = 25;
+      let added = 0;
+      for (let i = 0; i < rels.length; i += BATCH_SIZE) {
+        const chunk = rels.slice(i, i + BATCH_SIZE);
+        const extractRes = await applyDirectXmlLinks(secret, [], chunk);
+        added += extractRes.edgesAdded || 0;
+      }
+      console.log(`🎨 [Beautify] Graph extraction completed: +${added} edges.`);
       await rebuildSnapshot(secret);
     }
 
@@ -3047,24 +3312,118 @@ async function runBeautify(secret) {
           current.unlinked.length
         } newly surfaced boundary nodes...`
       );
-      const topAnchors = current.nodes.slice(0, 15).filter((a) => a.degree > 0);
+      const sweepProj = new Map(current.nodes.map((n) => [n.id, n.degree || 0]));
+      const sweepList = current.nodes.map((n, idx) => ({
+        ...n,
+        _viewIdx: idx,
+        _domainId: classifyNodeDomain(n).id
+      }));
+      const sweepHealthy = sweepList.filter(
+        (a) => !isTransientScratchNode(a) && (a.degree || 0) >= 1 && (a.degree || 0) < 20
+      );
+      const anchorPool = sweepHealthy.length
+        ? sweepHealthy
+        : sweepList.filter((a) => !isTransientScratchNode(a));
       const sweepRels = [];
       for (let i = 0; i < current.unlinked.length; i++) {
         const u = current.unlinked[i];
-        const { anchor, relation } = pickSemanticAnchor(u, topAnchors, i);
+        const domain = classifyNodeDomain(u);
+        const anchor = pickBalancedInViewAnchor(u, anchorPool, sweepProj, domain.id, i);
         if (anchor && (u.name !== anchor.name || u.type !== anchor.type)) {
           sweepRels.push({
             source: u.name,
             sourceType: u.type,
             target: anchor.name,
             targetType: anchor.type,
-            type: relation
+            type: determineSemanticRelation(u)
           });
+          sweepProj.set(u.id, (sweepProj.get(u.id) || 0) + 1);
+          sweepProj.set(anchor.id, (sweepProj.get(anchor.id) || 0) + 1);
         }
       }
       if (!sweepRels.length) break;
-      await applyDirectXmlLinks(secret, [], sweepRels);
+      const BATCH_SIZE = 25;
+      for (let i = 0; i < sweepRels.length; i += BATCH_SIZE) {
+        await applyDirectXmlLinks(secret, [], sweepRels.slice(i, i + BATCH_SIZE));
+      }
       await rebuildSnapshot(secret);
+    }
+
+    // Link globally isolated (globalDeg === 0) non-scratch nodes OUTSIDE top-500 view to out-of-view domain hubs
+    let globalIsolatedBefore = 0;
+    let globalIsolatedLinked = 0;
+    let engine = null;
+    try {
+      engine = await createGraphKvEngine("graph-linker-beautify-global");
+      const [allNodesRaw, allEdgesRaw] = await Promise.all([
+        engine.kvList("mem:graph:nodes"),
+        engine.kvList("mem:graph:edges")
+      ]);
+      const allNodes = (allNodesRaw || []).filter((n) => n && n.id && n.name);
+      const allEdges = (allEdgesRaw || []).filter((e) => e && e.id);
+      const globalDeg = new Map();
+      for (const e of allEdges) {
+        globalDeg.set(e.sourceNodeId, (globalDeg.get(e.sourceNodeId) || 0) + 1);
+        globalDeg.set(e.targetNodeId, (globalDeg.get(e.targetNodeId) || 0) + 1);
+      }
+
+      const outOfViewIsolated = allNodes.filter((n) => {
+        if (inViewIds.has(n.id)) return false;
+        if ((globalDeg.get(n.id) || 0) !== 0) return false;
+        const clean = normalizeSoftHyphens(unescapeXml(n.name));
+        if (!clean || isTransientScratchNode(n) || HALLUCINATION_REGEX.test(clean)) return false;
+        if (CJK_REGEX.test(clean) && !CJK_CANONICAL_MAP.has(clean)) return false;
+        return true;
+      });
+      globalIsolatedBefore = outOfViewIsolated.length;
+
+      if (outOfViewIsolated.length > 0) {
+        const outHubs = allNodes
+          .filter((n) => {
+            if (inViewIds.has(n.id)) return false;
+            const d = globalDeg.get(n.id) || 0;
+            return !isTransientScratchNode(n) && d >= 1 && d <= 22;
+          })
+          .map((n, idx) => ({
+            ...n,
+            _viewIdx: idx,
+            _domainId: classifyNodeDomain(n).id
+          }));
+        const outProj = new Map(outHubs.map((h) => [h.id, globalDeg.get(h.id) || 0]));
+        const globalRels = [];
+        for (let i = 0; i < outOfViewIsolated.length; i++) {
+          const iso = outOfViewIsolated[i];
+          const domain = classifyNodeDomain(iso);
+          let anchor = pickBalancedInViewAnchor(iso, outHubs, outProj, domain.id, i);
+          if (!anchor && domain.anchor && domain.anchor.name !== iso.name) {
+            anchor = domain.anchor;
+          }
+          if (anchor && (iso.name !== anchor.name || iso.type !== anchor.type)) {
+            globalRels.push({
+              source: iso.name,
+              sourceType: iso.type,
+              target: anchor.name,
+              targetType: anchor.type,
+              type: determineSemanticRelation(iso)
+            });
+            if (anchor.id) outProj.set(anchor.id, (outProj.get(anchor.id) || 0) + 1);
+          }
+        }
+        if (globalRels.length > 0) {
+          const BATCH_SIZE = 25;
+          for (let i = 0; i < globalRels.length; i += BATCH_SIZE) {
+            const res = await applyDirectXmlLinks(secret, [], globalRels.slice(i, i + BATCH_SIZE));
+            globalIsolatedLinked += res.edgesAdded || 0;
+          }
+          await rebuildSnapshot(secret);
+        }
+      }
+    } catch (err) {
+      console.warn("⚠️ [Beautify] Global isolated pass skipped:", err?.message || err);
+    } finally {
+      if (engine?.worker?.shutdown) {
+        await engine.worker.shutdown().catch(() => {});
+      }
     }
 
     const final = await queryGraph(secret);
@@ -3083,12 +3442,15 @@ async function runBeautify(secret) {
       JSON.stringify(
         {
           status: "beautified",
-          version: "3.1",
+          version: VERSION,
           unlinkedCount: final.unlinked.length,
           sparseWarningActive:
             final.unlinked.length > Math.floor(final.nodes.length * 0.1),
           viewNodes: final.nodes.length,
           viewEdges: final.edges.length,
+          truncated: Boolean(final.data?.truncated),
+          globalIsolatedBefore,
+          globalIsolatedLinked,
           maxDegree: maxDeg,
           avgDegree: avgDeg,
           clusters: THEMATIC_DOMAINS.map((d) => ({
@@ -3110,12 +3472,247 @@ async function runBeautify(secret) {
       } catch {}
     }
   }
+  process.exit(0);
+}
+
+function parseFlagNumber(args, flag, defaultValue) {
+  const idx = args.indexOf(flag);
+  if (idx === -1) return defaultValue;
+  const raw = args[idx + 1];
+  if (raw === undefined || raw.startsWith("--")) {
+    throw new Error(`Missing numeric value for ${flag}`);
+  }
+  const num = Number(raw);
+  if (!Number.isFinite(num)) {
+    throw new Error(`Invalid numeric value for ${flag}: ${raw}`);
+  }
+  return num;
+}
+
+function parseJsonOrFileArg(rawArg, usageHint) {
+  if (!rawArg) throw new Error(usageHint);
+  let text = rawArg;
+  if (fs.existsSync(rawArg) && fs.statSync(rawArg).isFile()) {
+    text = fs.readFileSync(rawArg, "utf8");
+  }
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new Error(`Invalid JSON payload (${err.message})`);
+  }
+}
+
+function toFiniteIntOrNegativeOne(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return -1;
+}
+
+/**
+ * Evaluates v4.0 verification invariants deterministically for --verify-json [--strict].
+ */
+function evaluateVerifyInvariants(metrics, strict = false) {
+  const unlinkedCount = toFiniteIntOrNegativeOne(metrics?.unlinkedCount);
+  const globalDeg0Count = toFiniteIntOrNegativeOne(metrics?.globalDeg0Count);
+  const incompleteRecords = toFiniteIntOrNegativeOne(metrics?.incompleteRecords);
+  const auditReducible = toFiniteIntOrNegativeOne(metrics?.auditReducible);
+  const truncated = Boolean(metrics?.truncated);
+
+  const checks = {
+    viewLinked: unlinkedCount === 0,
+    globalConnected: globalDeg0Count === 0,
+    indexComplete: incompleteRecords === 0,
+    auditClean: auditReducible === 0,
+    untruncated: !truncated,
+    strictBudgetOk: !strict || !truncated
+  };
+
+  const verified =
+    checks.viewLinked &&
+    checks.globalConnected &&
+    checks.indexComplete &&
+    checks.auditClean &&
+    checks.strictBudgetOk;
+
+  return { verified, checks };
+}
+
+/**
+ * Non-destructive v4.0 verification gate (--verify-json [--strict]).
+ */
+async function runVerifyJson(deps = {}, options = {}) {
+  const secret = deps.secret ?? getSecret();
+  const baseUrl = deps.baseUrl || BASE_URL;
+  const fetchImpl = deps.fetchImpl || fetch;
+  const maintenanceLockPath = deps.maintenanceLockPath || MAINTENANCE_LOCK_PATH;
+  const strict = Boolean(options.strict);
+  const days = Number.isFinite(Number(options.days)) ? Number(options.days) : 14;
+
+  const ownsEngine = !deps.engine;
+  const engine = deps.engine || (await createGraphKvEngine("graph-linker-verify"));
+
+  try {
+    const [graphState, indexData, statsData, audit] = await Promise.all([
+      queryGraph(secret, 500, { baseUrl, fetchImpl }),
+      fetchImpl(`${baseUrl}/agentmemory/graph/index`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${secret}` }
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .catch(() => null),
+      fetchImpl(`${baseUrl}/agentmemory/graph/stats`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${secret}` }
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .catch(() => null),
+      performGraphAudit(engine, { days })
+    ]);
+
+    let globalDeg0Count = 0;
+    for (const node of audit.allNodes || []) {
+      if ((audit.degreeMap.get(node.id) || 0) === 0) {
+        globalDeg0Count += 1;
+      }
+    }
+
+    const unlinkedCount = graphState.unlinked.length;
+    const incompleteRecords = toFiniteIntOrNegativeOne(
+      indexData?.incompleteRecords ?? indexData?.control?.incompleteRecords
+    );
+    const auditReducible = toFiniteIntOrNegativeOne(
+      audit.summary?.estimatedNodesReducible
+    );
+    const truncated = Boolean(graphState.data?.truncated);
+    const maintenanceLockActive = fs.existsSync(maintenanceLockPath);
+    const coverage =
+      (statsData?.coverage && statsData.coverage !== "unknown"
+        ? statsData.coverage
+        : null) ??
+      indexData?.coverage ??
+      statsData?.coverage ??
+      (indexData?.ready
+        ? incompleteRecords === 0
+          ? "complete"
+          : "partial"
+        : "unknown");
+
+    const { verified, checks } = evaluateVerifyInvariants(
+      {
+        unlinkedCount,
+        globalDeg0Count,
+        incompleteRecords,
+        auditReducible,
+        truncated
+      },
+      strict
+    );
+
+    return {
+      status: verified ? "verified" : "failed",
+      version: VERSION,
+      strict,
+      invariants: {
+        unlinkedCount,
+        globalDeg0Count,
+        incompleteRecords,
+        auditReducible,
+        truncated,
+        maintenanceLockActive,
+        coverage,
+        indexState: indexData?.state || indexData?.control?.status || "unknown",
+        indexReady: Boolean(indexData?.ready),
+        viewNodes: graphState.nodes.length,
+        viewEdges: graphState.edges.length,
+        totalStoreNodes:
+          graphState.data?.totalNodes ?? (audit.allNodes ? audit.allNodes.length : 0),
+        totalStoreEdges:
+          graphState.data?.totalEdges ?? (audit.allEdges ? audit.allEdges.length : 0),
+        xmlEntityCorruptedCount: audit.summary?.xmlEntityCorruptedCount ?? 0,
+        duplicateNodesToMerge: audit.summary?.duplicateNodesToMerge ?? 0,
+        singleNodesToUnescape: audit.summary?.singleNodesToUnescape ?? 0,
+        hallucinationCount: audit.summary?.hallucinationCount ?? 0,
+        transientScratchCount: audit.summary?.transientScratchCount ?? 0,
+        staleIsolatedCount: audit.summary?.staleIsolatedCount ?? 0
+      },
+      checks: {
+        ...checks,
+        indexReady: Boolean(indexData?.ready),
+        maintenanceUnlocked: !maintenanceLockActive
+      }
+    };
+  } finally {
+    if (ownsEngine && engine?.worker?.shutdown) {
+      await engine.worker.shutdown().catch(() => {});
+    }
+  }
+}
+
+async function withGraphDeps(workerLabel, secret, fn) {
+  const engine = await createGraphKvEngine(workerLabel);
+  const deps = {
+    engine,
+    secret,
+    baseUrl: BASE_URL,
+    graveyardPath: GRAVEYARD_PATH,
+    namespace: III_NAMESPACE,
+    queryGraph,
+    applyDirectXmlLinks,
+    rebuildSnapshot
+  };
+  try {
+    return await fn(deps);
+  } finally {
+    if (engine?.worker?.shutdown) {
+      await engine.worker.shutdown().catch(() => {});
+    }
+  }
 }
 
 async function main() {
   const args = process.argv.slice(2);
   const mode = args[0] || "--status";
-  const secret = getSecret();
+
+  if (mode === "--help" || mode === "-h") {
+    console.log(USAGE_TEXT);
+    return;
+  }
+
+  const KNOWN_MODES = new Set([
+    "--lock",
+    "--unlock",
+    "--status",
+    "--verify-json",
+    "--audit",
+    "--dedup",
+    "--rename",
+    "--prune",
+    "--restore",
+    "--optimize-ram",
+    "--delete",
+    "--heal",
+    "--drain",
+    "--logs",
+    "--beautify",
+    "--dump",
+    "--apply",
+    "--auto",
+    "--simulate-budget",
+    "--compact-edges",
+    "--suggest-merges",
+    "--merge-plan",
+    "--suggest-links",
+    "--apply-temporal"
+  ]);
+
+  if (!KNOWN_MODES.has(mode)) {
+    throw new Error(
+      `Unknown flag: ${mode}.\n\n${USAGE_TEXT}`
+    );
+  }
 
   if (mode === "--lock") {
     fs.writeFileSync(
@@ -3134,7 +3731,7 @@ async function main() {
       JSON.stringify(
         {
           status: "maintenance_locked",
-          version: "3.1",
+          version: VERSION,
           lockFile: MAINTENANCE_LOCK_PATH,
           message:
             "LLM background graph extraction frozen in Smart Router (0ms, 0 tokens). Graph is protected."
@@ -3160,7 +3757,7 @@ async function main() {
       JSON.stringify(
         {
           status: "maintenance_unlocked",
-          version: "3.1",
+          version: VERSION,
           lockFile: MAINTENANCE_LOCK_PATH,
           previouslyLocked: existed,
           message: "LLM background graph extraction resumed."
@@ -3170,6 +3767,16 @@ async function main() {
       )
     );
     return;
+  }
+
+  const secret = getSecret();
+
+  if (mode === "--verify-json") {
+    const strict = args.includes("--strict");
+    const days = parseFlagNumber(args, "--days", 14);
+    const report = await runVerifyJson({ secret }, { strict, days });
+    console.log(JSON.stringify(report, null, 2));
+    process.exit(report.status === "verified" ? 0 : 1);
   }
 
   if (mode === "--status") {
@@ -3185,7 +3792,7 @@ async function main() {
     console.log(
       JSON.stringify(
         {
-          version: "3.1",
+          version: VERSION,
           maintenanceLockActive: fs.existsSync(MAINTENANCE_LOCK_PATH),
           totalStoreNodes: data.totalNodes,
           totalStoreEdges: data.totalEdges,
@@ -3211,15 +3818,14 @@ async function main() {
   }
 
   if (mode === "--audit") {
-    const daysIdx = args.indexOf("--days");
-    const days = daysIdx !== -1 && args[daysIdx + 1] ? Number(args[daysIdx + 1]) : 14;
+    const days = parseFlagNumber(args, "--days", 14);
     const engine = await createGraphKvEngine("graph-linker-audit");
     const audit = await performGraphAudit(engine, { days });
     console.log(
       JSON.stringify(
         {
           status: "audit_completed",
-          version: "3.0",
+          version: VERSION,
           summary: audit.summary,
           sampleDuplicateGroups: audit.mergeGroups.slice(0, 20).map((g) => ({
             groupKey: g.groupKey,
@@ -3248,7 +3854,7 @@ async function main() {
       JSON.stringify(
         {
           status: "deduplicated",
-          version: "3.0",
+          version: VERSION,
           ...report,
           graveyardFile: GRAVEYARD_PATH,
           viewNodes: after.nodes.length,
@@ -3269,8 +3875,7 @@ async function main() {
   }
 
   if (mode === "--prune") {
-    const daysIdx = args.indexOf("--days");
-    const days = daysIdx !== -1 && args[daysIdx + 1] ? Number(args[daysIdx + 1]) : 14;
+    const days = parseFlagNumber(args, "--days", 14);
     const includeStale = args.includes("--include-stale");
     const includeHallucinations = !args.includes("--no-hallucinations");
     const engine = await createGraphKvEngine("graph-linker-prune");
@@ -3283,7 +3888,7 @@ async function main() {
     console.log(
       JSON.stringify(
         {
-          version: "3.0",
+          version: VERSION,
           ...report,
           viewNodes: after.nodes.length,
           viewEdges: after.edges.length,
@@ -3348,13 +3953,10 @@ async function main() {
 
   if (mode === "--apply") {
     applySystemAndRamPatches({ tuneRamEnv: false });
-    let rawJson = args[1];
-    if (!rawJson)
-      throw new Error("Usage: graph-linker.mjs --apply '<json_array>' or file path");
-    if (fs.existsSync(rawJson)) {
-      rawJson = fs.readFileSync(rawJson, "utf8");
-    }
-    const customLinks = JSON.parse(rawJson);
+    const customLinks = parseJsonOrFileArg(
+      args[1],
+      "Usage: graph-linker.mjs --apply '<json_array>' or file path"
+    );
     const { nodes } = await queryGraph(secret);
     const nodeByName = new Map(nodes.map((n) => [n.name, n]));
     const frontAnchors = nodes.slice(0, 25);
@@ -3467,7 +4069,7 @@ async function main() {
       JSON.stringify(
         {
           status: "completed",
-          version: "3.0",
+          version: VERSION,
           totalStoreNodes: finalState.data.totalNodes,
           totalStoreEdges: finalState.data.totalEdges,
           viewNodes: finalState.nodes.length,
@@ -3481,12 +4083,152 @@ async function main() {
     return;
   }
 
-  throw new Error(
-    `Unknown flag: ${mode}. Use --status, --lock, --unlock, --audit, --dedup, --rename, --prune, --restore, --optimize-ram, --beautify, --delete, --heal, --logs, --dump, --apply, or --auto.`
-  );
+  if (mode === "--simulate-budget") {
+    const limit = parseFlagNumber(args, "--limit", 250);
+    const targetMaxReads = parseFlagNumber(args, "--target-reads", 3800);
+    const queryLimit = parseFlagNumber(args, "--query-limit", 500);
+    const report = await withGraphDeps("graph-linker-simulate-budget", secret, (deps) =>
+      runBudgetSimulation(deps, { limit, targetMaxReads, queryLimit })
+    );
+    console.log(JSON.stringify({ version: VERSION, ...report }, null, 2));
+    return;
+  }
+
+  if (mode === "--compact-edges") {
+    const dryRun = !args.includes("--apply");
+    const targetMaxReads = parseFlagNumber(args, "--target-reads", 3800);
+    const limit = parseFlagNumber(args, "--limit", 250);
+    const queryLimit = parseFlagNumber(args, "--query-limit", 500);
+    const report = await withGraphDeps("graph-linker-compact-edges", secret, (deps) =>
+      compactRedundantEdges(deps, { dryRun, targetMaxReads, limit, queryLimit })
+    );
+    console.log(JSON.stringify({ version: VERSION, ...report }, null, 2));
+    return;
+  }
+
+  if (mode === "--suggest-merges") {
+    const limit = parseFlagNumber(args, "--limit", 50);
+    const minScore = parseFlagNumber(args, "--min-score", 0.45);
+    const includeCrossType = !args.includes("--same-type-only");
+    const report = await withGraphDeps("graph-linker-suggest-merges", secret, (deps) =>
+      findSemanticDuplicateCandidates(deps, { limit, minScore, includeCrossType })
+    );
+    console.log(JSON.stringify({ version: VERSION, ...report }, null, 2));
+    return;
+  }
+
+  if (mode === "--merge-plan") {
+    const payloadArg = args
+      .slice(1)
+      .find((a) => a !== "--dry-run" && a !== "--apply");
+    const planItems = parseJsonOrFileArg(
+      payloadArg,
+      "Usage: graph-linker.mjs --merge-plan '<json_or_file>' [--dry-run]"
+    );
+    const dryRun = args.includes("--dry-run");
+    const report = await withGraphDeps("graph-linker-merge-plan", secret, (deps) =>
+      applySemanticMergePlan(deps, planItems, { dryRun })
+    );
+    console.log(JSON.stringify({ version: VERSION, ...report }, null, 2));
+    return;
+  }
+
+  if (mode === "--suggest-links") {
+    const limit = parseFlagNumber(args, "--limit", 40);
+    const report = await withGraphDeps("graph-linker-suggest-links", secret, (deps) =>
+      buildSemanticLinkBatch(deps, { limit })
+    );
+    console.log(JSON.stringify({ version: VERSION, ...report }, null, 2));
+    return;
+  }
+
+  if (mode === "--apply-temporal") {
+    const payloadArg = args
+      .slice(1)
+      .find((a) => a !== "--dry-run" && a !== "--apply");
+    const triples = parseJsonOrFileArg(
+      payloadArg,
+      "Usage: graph-linker.mjs --apply-temporal '<json_or_file>' [--dry-run]"
+    );
+    const dryRun = args.includes("--dry-run");
+    const report = await withGraphDeps("graph-linker-apply-temporal", secret, (deps) =>
+      applyTemporalLinks(deps, triples, { dryRun })
+    );
+    console.log(JSON.stringify({ version: VERSION, ...report }, null, 2));
+    return;
+  }
+
+  throw new Error(`Unknown flag: ${mode}.\n\n${USAGE_TEXT}`);
 }
 
-main().catch((err) => {
-  console.error("Error:", err.message);
-  process.exit(1);
-});
+export {
+  VERSION,
+  USAGE_TEXT,
+  BASE_URL,
+  GRAVEYARD_PATH,
+  MAINTENANCE_LOCK_PATH,
+  III_NAMESPACE,
+  VALID_RELATIONS,
+  CONTROL_NODE_TYPES,
+  CONTROL_EDGE_TYPES,
+  THEMATIC_DOMAINS,
+  INTER_CLUSTER_BRIDGES,
+  IMMUNE_NODE_TYPES,
+  IMMUNE_ANCHOR_NAMES,
+  TECH_LEXICON,
+  HALLUCINATION_REGEX,
+  CJK_REGEX,
+  CJK_CANONICAL_MAP,
+  getSecret,
+  stripLoneSurrogates,
+  unescapeXml,
+  escapeXml,
+  normalizeRelation,
+  projectRecord,
+  createGraphKvEngine,
+  appendToGraveyard,
+  readGraveyard,
+  writeGraveyard,
+  getErrorFingerprint,
+  isXmlEntityCorrupted,
+  normalizeSoftHyphens,
+  normalizeUnicodeGraphKey,
+  isTransientScratchNode,
+  isNodeImmune,
+  buildDeduplicationPlan,
+  performGraphAudit,
+  executeDeduplication,
+  deleteNodesAcross5Layers,
+  executePrune,
+  queryGraph,
+  classifyNodeDomain,
+  determineSemanticRelation,
+  pickSemanticAnchor,
+  pickBalancedInViewAnchor,
+  applyDirectXmlLinks,
+  rebuildSnapshot,
+  parseFlagNumber,
+  parseJsonOrFileArg,
+  evaluateVerifyInvariants,
+  runVerifyJson,
+  main
+};
+
+const isMain = (() => {
+  if (!process.argv[1]) return false;
+  try {
+    return (
+      fs.realpathSync(process.argv[1]) ===
+      fs.realpathSync(fileURLToPath(import.meta.url))
+    );
+  } catch {
+    return path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+  }
+})();
+
+if (isMain) {
+  main().catch((err) => {
+    console.error("Error:", err.message);
+    process.exit(1);
+  });
+}

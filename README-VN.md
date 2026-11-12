@@ -1,4 +1,4 @@
-# AgentMemory Knowledge Graph Linker, Deduplicator, Cleaner & Smart AI Router (v3.0)
+# AgentMemory Knowledge Graph Linker, Semantic Planner, Edge Compactor & Smart AI Router (v4.0)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Companion for AgentMemory](https://img.shields.io/badge/Companion%20For-rohitg00%2Fagentmemory-blue.svg)](https://github.com/rohitg00/agentmemory)
@@ -7,30 +7,33 @@
 
 > [!IMPORTANT]
 > **Yêu cầu hệ sinh thái / Điều kiện tiên quyết:**
-> Bộ công cụ này là skill bổ trợ thiết yếu được thiết kế đặc thù cho dự án mã nguồn mở **[AgentMemory (`rohitg00/agentmemory`)](https://github.com/rohitg00/agentmemory)**.
-> Skill tương tác trực tiếp với daemon của `@agentmemory/agentmemory`, kết nối WebSocket qua `iii-sdk` (`ws://127.0.0.1:49134`), và giao diện đồ thị tri thức (`http://localhost:3113/#graph`). Máy bạn cần cài đặt và chạy [AgentMemory](https://github.com/rohitg00/agentmemory) để sử dụng toàn bộ tính năng.
+> Bộ công cụ này là skill bổ trợ thiết kế đặc thù cho dự án mã nguồn mở **[AgentMemory (`rohitg00/agentmemory`)](https://github.com/rohitg00/agentmemory)**.
+> Skill tương tác trực tiếp với daemon `@agentmemory/agentmemory`, kết nối WebSocket qua `iii-sdk` (`ws://127.0.0.1:49134`) và đồ thị tri thức (`http://localhost:3113/#graph`). Máy cần cài đặt và chạy [AgentMemory](https://github.com/rohitg00/agentmemory) trước khi sử dụng.
 
-Bộ công cụ **Antigravity Skill (`agentmemory-graph-linker`)** kèm **Smart AI Router 11 tầng (v3.0)** giúp tự động nối các node rời rạc (`UNLINKED / NO RELATIONS YET`), kiểm toán & lọc bỏ "ảo giác" từ các API miễn phí với **chi phí 0 token**, gộp các node lỗi/thực thể trùng lặp trên cả 5 tầng KV, đổi tên node tại chỗ an toàn, dọn các node tạm vào **Thùng Rác Lạnh (`~/.agentmemory/graveyard.jsonl`)** có thể khôi phục 100% bằng `--restore`, tối ưu hóa mạnh mẽ dung lượng RAM của `iii-engine`, đọc & tự sửa lỗi từ `mcp-crash.log` / daemon log bằng **con trỏ byte-offset tiết kiệm 100% token**, và làm đẹp đồ thị tri thức [AgentMemory](https://github.com/rohitg00/agentmemory) (`http://localhost:3113/#graph`).
+Bộ công cụ **Hybrid Neuro-Symbolic Antigravity Skill (`agentmemory-graph-linker`)** kèm **Task-Aware Smart AI Router (v4.0)** tối ưu cho **Gemini 4 Hydrogen**: kết hợp kiểm toán đồ thị 0 token, mô phỏng ngân sách đọc `maxReads: 4096`, nén cạnh dư thừa an toàn (`edge-compactor.mjs`), lập kế hoạch gộp từ đồng nghĩa & liên kết hai chiều thời gian bi-temporal (`semantic-planner.mjs`), lưu trữ **Thùng Rác Lạnh (`~/.agentmemory/graveyard.jsonl`)** có thể khôi phục bằng `--restore`, tối ưu RAM/log cho `iii-engine`, và cổng kiểm định bắt buộc `--verify-json [--strict]` — đồng thời giữ nguyên tương thích `--beautify` / `--auto` tốn 0 token.
 
 ---
 
-## ✨ Tính năng nổi bật (v3.0)
+## ✨ Tính năng nổi bật (v4.0)
 
-1. **Kiểm Toán Nguồn Gốc & Bắt "Ảo Giác" Tốn 0 Token (`--audit`)**:
-   - Đối chiếu toàn bộ các node trên đồ thị với kho dữ liệu `mem:obs:*`, `mem:memories` và `mem:summaries` cục bộ kết hợp **Từ điển Kỹ thuật (Tech Lexicon)** và bộ lọc ảo giác ngoài luồng trong `< 400ms` qua WebSocket.
-   - Bắt gọn các node "ảo giác ngáo" do model miễn phí tự bịa (như *"invasion German"*, *"Craig"*, *"Fightnite"*, lỗi sai dấu tên riêng), lỗi mã hóa lặp entity XML (`&amp;quot;`), cụm lỗi trùng lặp và file tạm mà **không tốn bất kỳ 1 lượt gọi API hay token LLM nào**.
-2. **Gộp Lỗi Kiểu Sentry & Đổi Tên Nguyên Tử Trên 5 Tầng KV (`--dedup` & `--rename`)**:
-   - Gom các biến thể lỗi lặp (ví dụ 17 node lỗi `ProcessException: exit code 72 ... xcodebuild`), các node trùng tên khác hoa/thường (`Flutter` vs `flutter`), và các node bị nhân bản `&amp;lt;` về **1 Node Chuẩn (Canonical Node)** duy nhất; tự động chuyển hướng toàn bộ cạnh liên kết trên cả 5 tầng KV và cộng dồn chỉ số `properties.occurrences`.
-   - `--rename "<tên_cũ>" "<tên_mới>" [--type <loại>]` đổi tên node tại chỗ trên cả 5 tầng KV mà không làm hỏng chỉ mục `mem:graph:retrieval-data` (hoặc tự động gộp nếu tên mới đã tồn tại).
-   - Tự động vá hàm `parseAttrs(raw)` trong `dist/*.mjs` của AgentMemory để giải mã trực tiếp các thực thể XML (`&quot;`, `&lt;`, `&gt;`, `&amp;`), chấm dứt vĩnh viễn lỗi nhân bản `&amp;quot;`.
-3. **Thùng Rác Lạnh (`~/.agentmemory/graveyard.jsonl`) & Kim Bài Miễn Tử (`--prune` & `--restore`)**:
-   - **Kim Bài Miễn Tử (Immunity Whitelist)**: Bảo vệ tuyệt đối các node `decision`, `preference`, `pattern`, `person`, `project`, `milestone`, mọi node `error` đã có cạnh `fixes` giải quyết, các anchor chủ đề và các node trung tâm có `degree >= 4`.
-   - **Lưu trữ lạnh không mất dữ liệu**: Trước khi `--prune`, `--dedup` hoặc `--delete` xóa bất kỳ node nào khỏi 5 tầng KV, toàn bộ dữ liệu Node + các Cạnh liên đới + Facets đều được ghi ra `~/.agentmemory/graveyard.jsonl`. Cần khôi phục lại bất cứ lúc nào chỉ cần chạy `--restore "<tên_hoặc_id>"` (hoặc `--restore --last`).
-4. **Tối Ưu Hóa Thực Chiến RAM Cho `iii-engine` (`--optimize-ram`)**:
-   - Giải phóng hàng chục nghìn bản ghi danh sách liên kết đôi trong `mem:graph:retrieval-data` khỏi bộ nhớ RAM của tiến trình Rust `iii-engine`, đồng thời tinh chỉnh `MAX_OBS_PER_SESSION=800` & `AGENTMEMORY_CAPTURE_OUTPUT_MAX=3500` trong `~/.agentmemory/.env`.
-5. **Đọc Log Tăng Trưởng Không Tốn Token (`--logs` & `--heal`, #1662 / #1674) & Smart AI Router v3.0**:
-   - Lưu vị trí con trỏ `{ ino, offset, mtimeMs }` tại `~/.agentmemory/.log-heal-cursor.json` giúp bỏ qua 100% các dòng log đã đọc (`unreadBytesRead: 0`).
-   - `smart-router.mjs` v3.0 tích hợp chống lưu câu trả lời cụt (#1495), cắt chuỗi an toàn Surrogate (#1598), giải mã entity XML lồng nhau và cổng chặn thực thể rác/ảo giác ngay từ đầu vào.
+1. **Cổng Kiểm Định Bắt Buộc (`--verify-json [--strict]`)**:
+   - Kiểm tra bất biến không phá hủy dữ liệu qua `queryGraph`, `/agentmemory/graph/index`, `/agentmemory/graph/stats`, `performGraphAudit` và `maintenance.lock`.
+   - Xuất JSON có cấu trúc (`status: "verified" | "failed"`, `version: "4.0"`, `invariants`, `checks`) và chỉ trả exit code `0` khi `unlinkedCount === 0 && globalDeg0Count === 0 && incompleteRecords === 0 && auditReducible === 0 && (!strict || !truncated)`.
+2. **Mô Phỏng Ngân Sách Đọc & Nén Cạnh An Toàn (`--simulate-budget` & `--compact-edges`)**:
+   - Tính toán chi phí đọc KV cho top-500 `pageNodes` theo giới hạn `maxReads: 4096` (`8MB`), chỉ điểm các `hotHubs` gây `truncated: true`, và dọn các cạnh heuristic `related_to` trọng số thấp (`weight <= 0.45`) vào `graveyard.jsonl` (mặc định dry-run; truyền `--apply` để thực thi).
+   - Bảo vệ tuyệt đối `minDegree >= 2` (không bao giờ làm đứt liên kết tạo node bậc 0) và giữ nguyên các cạnh ngữ nghĩa mạnh (`fixes`, `depends_on`, `imports`, `modifies`, `uses` hoặc `weight >= 0.8`).
+3. **Gộp Thực Thể Ngữ Nghĩa & Đồ Thị Bi-Temporal (`--suggest-merges`, `--merge-plan`, `--suggest-links`, `--apply-temporal`)**:
+   - `--suggest-merges` chấm điểm các cặp đồng nghĩa/alias tốn 0 token (`scoreSynonymPair`); `--merge-plan` thực thi gộp 5 tầng KV theo phán đoán của Hydrogen, giới hạn `node.aliases <= 10` và `sourceObservationIds <= 24` để luôn dưới ngưỡng `MAX_POSTINGS=192`.
+   - `--suggest-links` gom các node rời rạc / ít liên kết `related_to` kèm trích đoạn `mem:obs:*` và danh sách hub ứng viên; `--apply-temporal` ghi nhận các quan hệ giàu ngữ nghĩa (`implements`, `configures`, `replaces`, `caused_by`, `optimizes`, `fixes`, `depends_on`, `supersedes`, ...) cùng siêu dữ liệu thời gian (`tvalid`, `tvalidEnd`, `isLatest`, `supersededBy`).
+4. **Task-Aware Smart AI Router v4.0 (`router/smart-router.mjs`)**:
+   - Phân luồng thông minh: tác vụ `<observation>` / `any` đi qua chuỗi nhanh & hạn mức cao (`gemini-3.1-flash-lite-preview`, `gemini-flash-lite-latest`, `openai/gpt-oss-20b`, ...), còn `<summary>` / `<entities>` / `graph` ưu tiên độ chính xác cao (`gemini-3.8-flash`, `gemini-flash-latest`, `openai/gpt-oss-120b`, `gemma-4-26b-a4b-it`, ...) trước khi fallback xuống Z Fold 3 cục bộ và Local Extractive Fallback.
+   - Làm sạch XML `<observation>` / `<summary>` (`sanitizeObservationOrSummaryXml`), hỗ trợ cả thẻ `<entity>` / `<relationship>` có thân thẻ, trích xuất file/concept thật trong fallback cục bộ (không gắn nhầm cạnh `~/.agentmemory/.env` giả), và trả `chains: { fast, accuracy }` qua `GET /`.
+5. **Khóa Bảo Trì, Kiểm Toán 0 Token, Khử Trùng 5 Tầng & Thùng Rác Lạnh (`--lock`, `--unlock`, `--audit`, `--dedup`, `--rename`, `--prune`, `--restore`, `--delete`)**:
+   - `--lock` / `--unlock` đóng băng LLM trích xuất nền qua `~/.agentmemory/maintenance.lock` (`0ms`, `0` token); tự động khóa khi chạy `--beautify` và `--optimize-ram`.
+   - `--audit` phát hiện bản sao XML (`&amp;quot;`), cụm lỗi kiểu Sentry, ký tự gạch nối Unicode `‑` (`\u2010-\u2015\u2212\u00ad`), ảo giác CJK / ngoài luồng và file tạm trong `<400ms` tốn 0 token.
+   - **Kim Bài Miễn Tử (Immunity Whitelist)** bảo vệ `decision`, `preference`, `pattern`, `person`, `project`, `milestone`, `song`, `error` đã có cạnh `fixes`, các anchor chủ đề và hub `degree >= 4`; mọi node/cạnh bị dọn hoặc gộp đều được lưu vào `~/.agentmemory/graveyard.jsonl` để khôi phục không mất dữ liệu bằng `--restore`.
+6. **Ổn Định Session, Tối Ưu RAM `iii-engine` & Đọc Log 0 Token (`--optimize-ram`, `--heal`, `--logs`)**:
+   - Thiết lập `MAX_OBS_PER_SESSION=0` (không giới hạn số observation mỗi session để tránh lỗi dead-letter) và `AGENTMEMORY_CAPTURE_OUTPUT_MAX=3500`, vá giải mã XML `parseAttrs(raw)`, bổ sung watermark `event::session::stopped` (`graph_wm:<sessionId>`), thêm bộ lọc rác & chống node mồ côi cho `extractGraphHeuristics` / `mem::graph-extract`, và đọc log tăng trưởng qua con trỏ byte-offset (`~/.agentmemory/.log-heal-cursor.json`).
 
 ---
 
@@ -39,18 +42,25 @@ Bộ công cụ **Antigravity Skill (`agentmemory-graph-linker`)** kèm **Smart 
 ```text
 agentmemory-graph-linker/
 ├── LICENSE                                        # Giấy phép mã nguồn mở MIT
-├── README.md                                      # Tài liệu hướng dẫn tiếng Anh (Mặc định)
-├── README-VN.md                                   # Tài liệu hướng dẫn tiếng Việt
-├── install.sh                                     # Script cài đặt tự động 1 lệnh & vá hệ thống v3.0
+├── README.md                                      # Tài liệu tiếng Anh (Mặc định)
+├── README-VN.md                                   # Tài liệu tiếng Việt
+├── install.sh                                     # Script cài đặt tự động & vá hệ thống v4.0
 ├── skill/
 │   └── agentmemory-graph-linker/
-│       ├── SKILL.md                               # Skill cho Antigravity (v3.0)
-│       ├── REFERENCE.md                           # Kiến trúc 5 tầng KV, Thùng rác lạnh, tối ưu RAM & changelog
+│       ├── SKILL.md                               # Skill Hybrid Neuro-Symbolic cho Gemini 4 Hydrogen (v4.0)
+│       ├── REFERENCE.md                           # Chi tiết ngân sách 4096, 5 tầng KV, semantic/temporal & changelog
 │       └── scripts/
-│           └── graph-linker.mjs                   # CLI thực thi (--status, --audit, --dedup, --rename, --prune, --restore, --optimize-ram, --beautify, --delete, --heal, --logs, --dump, --apply, --auto)
-└── router/
-    ├── smart-router.mjs                           # Smart AI Router v3.0 (đọc API key từ ~/.agentmemory/.env)
-    └── com.agentmemory.smartrouter.plist.example  # Mẫu LaunchAgent tự chạy ngầm trên macOS
+│           ├── graph-linker.mjs                   # CLI thực thi & cổng kiểm định (v4.0)
+│           ├── edge-compactor.mjs                 # Mô phỏng ngân sách đọc & nén cạnh dư thừa an toàn
+│           └── semantic-planner.mjs               # Chấm điểm đồng nghĩa, gộp alias & liên kết bi-temporal
+├── router/
+│   ├── smart-router.mjs                           # Task-Aware Smart AI Router v4.0 (đọc key từ ~/.agentmemory/.env)
+│   └── com.agentmemory.smartrouter.plist.example  # Mẫu LaunchAgent tự chạy ngầm trên macOS
+└── tests/
+    ├── edge-compactor.test.mjs                    # Bộ test node:test cho mô phỏng ngân sách & nén cạnh
+    ├── graph-linker.test.mjs                      # Bộ test node:test cho chuẩn hóa, dedup & CLI help
+    ├── semantic-planner.test.mjs                  # Bộ test node:test cho synonym scoring & gộp giới hạn
+    └── smart-router.test.mjs                      # Bộ test node:test cho tiering, lọc XML & fallback
 ```
 
 ---
@@ -68,53 +78,63 @@ bash install.sh
 ## 🛠️ Cách sử dụng
 
 ```bash
-# 1. Kiểm tra trạng thái đồ thị & số lượng node unlinked
-node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --status
+SCRIPT=~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs
 
-# 2. Kiểm toán (Dry-run Audit): tìm nhóm node trùng, lỗi mã hóa XML, ảo giác & file rác (Chỉ xem, không xóa)
-node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --audit
+# 1. Kiểm tra trạng thái đồ thị & các bất biến nền
+node "$SCRIPT" --status
+node "$SCRIPT" --verify-json [--strict]
 
-# 3. Gộp tự động 5 tầng KV: gom lỗi trùng kiểu Sentry, gộp node khác hoa/thường & làm sạch entity XML
-node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --dedup
+# 2. Trích xuất ứng viên tốn 0 token & mô phỏng ngân sách đọc 4096
+node "$SCRIPT" --audit [--days 14]
+node "$SCRIPT" --simulate-budget [--limit N] [--target-reads N] [--query-limit N]
+node "$SCRIPT" --suggest-merges [--limit N] [--min-score S] [--same-type-only]
+node "$SCRIPT" --suggest-links [--limit N]
 
-# 4. Đổi tên/sửa nội dung node tại chỗ trên cả 5 tầng KV (hoặc tự gộp nếu tên mới đã tồn tại)
-node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --rename "Tên Cũ hoặc gn_id" "Tên Mới Chuẩn"
+# 3. Thực thi nguyên tử trên 5 tầng KV + Thùng Rác Lạnh
+node "$SCRIPT" --lock "Manual refactoring"
+node "$SCRIPT" --dedup
+node "$SCRIPT" --merge-plan '<json_or_file>' [--dry-run]
+node "$SCRIPT" --prune [--days 14] [--include-stale] [--include-hallucinations] [--no-hallucinations]
+node "$SCRIPT" --apply-temporal '<json_or_file>' [--dry-run]
+node "$SCRIPT" --compact-edges [--apply] [--target-reads N] [--limit N] [--query-limit N]
+node "$SCRIPT" --unlock
 
-# 5. Dọn các node tạm & ảo giác vào Thùng Rác Lạnh (~/.agentmemory/graveyard.jsonl) có Kim Bài Miễn Tử bảo vệ
-node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --prune
+# 4. Đổi tên tại chỗ, khôi phục từ Thùng Rác Lạnh & xóa node chỉ định
+node "$SCRIPT" --rename "Tên Cũ hoặc gn_id" "Tên Mới Chuẩn" [--type <new_type>]
+node "$SCRIPT" --restore --list
+node "$SCRIPT" --restore --last
+node "$SCRIPT" --restore "Tên Node hoặc gn_id"
+node "$SCRIPT" --delete "Tên Node 1" "gn_id_2"
 
-# 6. Xem danh sách hoặc Khôi phục 100% node + cạnh từ Thùng Rác Lạnh
-node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --restore --list
-node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --restore "Tên Node hoặc gn_id"
+# 5. Fallback liên kết 0 token, tối ưu RAM & bảo trì hệ thống/log
+node "$SCRIPT" --beautify
+node "$SCRIPT" --auto
+node "$SCRIPT" --dump
+node "$SCRIPT" --apply /path/to/links.json
+node "$SCRIPT" --optimize-ram
+node "$SCRIPT" --heal                              # alias: --drain
+node "$SCRIPT" --logs [--reset-cursor]
+node "$SCRIPT" --help                              # hoặc -h
 
-# 7. Tối ưu hóa RAM & Đồ thị 1 chạm (tinh chỉnh .env + vá XML + gộp node trùng + dọn rác vào graveyard + quét session)
-node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --optimize-ram
-
-# 8. Làm đẹp & phân bổ đều đồ thị thành 6 cụm chòm sao chủ đề + quét biên tự động (Khuyên dùng)
-node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --beautify
-
-# 9. Xóa vĩnh viễn các node chỉ định trên cả 5 tầng KV (vẫn được sao lưu vào graveyard.jsonl)
-node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --delete "Tên Node 1" "gn_id_2"
-
-# 10. Bảo trì 1 chạm: đọc/sửa log mới + xả spool + quét session bỏ rơi + kiểm tra index + rebuild snapshot
-node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --heal
-
-# 11. Chỉ đọc phần byte mới phát sinh trong mcp-crash.log & daemon log (0 byte nếu đã đọc xong)
-node ~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs --logs
+# 6. Cổng kiểm định bắt buộc sau khi chỉnh sửa đồ thị
+node "$SCRIPT" --verify-json --strict
 ```
 
 ---
 
 ## 📋 Changelog (Lịch sử phiên bản)
 
+- **v4.0 (2026-11-13)**:
+  - **Nâng cấp Hybrid Neuro-Symbolic (Gemini 4 Hydrogen)**: Bổ sung `edge-compactor.mjs` (`--simulate-budget`, `--compact-edges [--apply]`), `semantic-planner.mjs` (`--suggest-merges`, `--merge-plan`, `--suggest-links`, `--apply-temporal`) và cổng kiểm định `--verify-json [--strict]`.
+  - **Task-Aware Smart AI Router v4.0**: Tách `FAST_MODEL_ORDER` và `ACCURACY_MODEL_ORDER` (`selectTargetsForFormat`), bổ sung `gemini-flash-latest`, sửa lỗi fallback `<observation>` bị gán cứng `.env`, hỗ trợ làm sạch thẻ XML `<entity>`/`<relationship>` có thân thẻ, và thêm entrypoint guard + bộ `tests/*.test.mjs`.
+- **v3.2 (2026-11-09)**:
+  - Chuyển `MAX_OBS_PER_SESSION=0` (không giới hạn) để tránh rớt observation vào dead-letter, bảo vệ cụm nhạc/Hi-Res Audio (`song`), thêm watermark `event::session::stopped` (`graph_wm:<sessionId>`), bộ lọc rác & chống orphan trong `extractGraphHeuristics`, làm sạch XML `<observation>`/`<summary>`, và chuẩn hóa gạch nối Unicode `‑` (`normalizeSoftHyphens`).
+- **v3.1 (2026-11-08)**:
+  - Bổ sung Chế độ Khóa Bảo Trì (`--lock` & `--unlock`) và cổng chặn ảo giác CJK / ngoài luồng.
 - **v3.0 (2026-11-07)**:
-  - **Kiểm Toán Nguồn Gốc & Bắt Ảo Giác 0 Token (`--audit`)**: Đối chiếu node với toàn bộ kho `mem:obs:*`, `mem:memories`, `mem:summaries` và Từ điển Kỹ thuật trong `< 400ms` tốn 0 token LLM.
-  - **Gộp Lỗi Kiểu Sentry & Khử Trùng Lặp 5 Tầng KV (`--dedup`)**: Gom các node lỗi lặp, node trùng khác hoa/thường và bản sao lỗi mã hóa XML về 1 Node Chuẩn, tự động chuyển hướng cạnh và cộng dồn `properties.occurrences`.
-  - **Đổi Tên Node Nguyên Tử 5 Tầng KV (`--rename`)**: Đổi tên hoặc hợp nhất node đồng bộ trên `mem:graph:nodes`, `mem:graph:name-index`, `mem:graph:node-degree`, `mem:graph:retrieval-data` và `mem:graph:retrieval-control`.
-  - **Thùng Rác Lạnh (`~/.agentmemory/graveyard.jsonl`) & Khôi Phục Không Mất Dữ Liệu (`--prune` & `--restore`)**: Bảo vệ tri thức quan trọng bằng Kim Bài Miễn Tử và sao lưu đầy đủ node + cạnh ra ổ cứng trước khi xóa khỏi RAM.
-  - **Tối Ưu Hóa RAM `iii-engine` (`--optimize-ram`) & Tự Vá Giải Mã XML `parseAttrs`**: Hạ `MAX_OBS_PER_SESSION=800` & `AGENTMEMORY_CAPTURE_OUTPUT_MAX=3500`, vá hàm `parseAttrs(raw)` trong `dist/*.mjs` để tự giải mã entity XML, và nâng cấp `smart-router.mjs` lên v3.0.
+  - Bổ sung `--audit`, `--dedup` kiểu Sentry, `--rename` 5 tầng KV, Thùng Rác Lạnh (`~/.agentmemory/graveyard.jsonl`) với `--prune` / `--restore`, `--optimize-ram`, và tự vá giải mã XML `parseAttrs`.
 - **v2.2 (2026-11-05)**:
-  - Bổ sung Đọc Log Tăng Trưởng Không Tốn Token (`--logs` & `--heal`, #1662 / #1674), Smart AI Router v2.2 chống lưu câu trả lời cụt (#1495) & cắt chuỗi Surrogate-safe (#1598), và xóa 5 tầng KV kèm Facet (#1642).
+  - Bổ sung Đọc Log Tăng Trưởng Không Tốn Token (`--logs` & `--heal`, #1662 / #1674), Smart AI Router chống lưu câu trả lời cụt (#1495) & cắt chuỗi Surrogate-safe (#1598), và xóa 5 tầng KV kèm Facet (#1642).
 - **v2.1 (2026-11-05)**:
   - Bổ sung tự động vá `maxReads: 4096` (`8MB`) và tự động khôi phục chỉ mục đồ thị bị tạm dừng.
 - **v2.0 (2026-11-05)**:
