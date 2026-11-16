@@ -152,20 +152,21 @@ Why AgentMemory grows in RAM and dead letters on busy sessions:
 
 ---
 
-## 8. Task-Aware Smart AI Router Architecture (`smart-router.mjs` v4.0)
+## 8. Task-Aware Smart AI Router Architecture (`smart-router.mjs` v4.1)
 
-`router/smart-router.mjs` runs at `:3118` (loaded from `~/.agentmemory/.env`) with **Task-Aware Model Tiering** via `selectTargetsForFormat(expectedFormat, targets)`:
+`router/smart-router.mjs` runs at `:3118` (loaded from `~/.agentmemory/.env`) with **14-Tier Task-Aware Model Tiering** via `selectTargetsForFormat(expectedFormat, targets)`:
 
 | Task Format | Tier Order | Primary Goal |
 | :--- | :--- | :--- |
-| **`observation` / `any`** (`FAST_MODEL_ORDER`) | `gemini-3.1-flash-lite-preview` -> `gemini-flash-lite-latest` -> `openai/gpt-oss-20b` -> `gemma-4-26b-a4b-it` -> `qwen/qwen3.8-27b` -> `gemini-flash-latest` -> `gemini-3.8-flash` -> `openai/gpt-oss-120b` -> Z Fold 3 USB/Wi-Fi (`qwen2.5-3b-instruct`) -> Local Extractive Fallback | Low latency, high quota for frequent per-tool `<observation>` calls |
-| **`summary` / `entities` / `graph` / `temporal_graph`** (`ACCURACY_MODEL_ORDER`) | `gemini-3.8-flash` -> `gemini-flash-latest` -> `openai/gpt-oss-120b` -> `gemma-4-26b-a4b-it` -> `gemini-3.1-flash-lite-preview` -> `gemini-flash-lite-latest` -> `openai/gpt-oss-20b` -> `qwen/qwen3.8-27b` -> Z Fold 3 USB/Wi-Fi (`qwen2.5-3b-instruct`) -> Local Extractive Fallback | Higher reasoning accuracy for `<summary>` & graph extraction |
+| **`observation` / `any`** (`FAST_MODEL_ORDER`) | `gemini-3.1-flash-lite-preview` -> `gemini-flash-lite-latest` -> `openai/gpt-oss-20b` -> `gemma-4-26b-a4b-it` -> `gemma-4-31b-it` -> `qwen/qwen3.8-27b` -> `gemini-flash-latest` -> `gemini-3.8-flash` -> `gemini-3-flash-preview` -> `gemini-4-hydrogen` -> `openai/gpt-oss-120b` -> Z Fold 3 USB/Wi-Fi (`qwen2.5-3b-instruct`) -> Local Extractive Fallback | Low latency, high quota for frequent per-tool `<observation>` calls (protects 20-RPD tiers) |
+| **`summary` / `entities` / `graph` / `temporal_graph`** (`ACCURACY_MODEL_ORDER`) | `gemini-4-hydrogen` -> `gemini-3-flash-preview` -> `gemini-3.8-flash` -> `gemini-flash-latest` -> `openai/gpt-oss-120b` -> `gemma-4-31b-it` -> `gemma-4-26b-a4b-it` -> `gemini-3.1-flash-lite-preview` -> `gemini-flash-lite-latest` -> `openai/gpt-oss-20b` -> `qwen/qwen3.8-27b` -> Z Fold 3 USB/Wi-Fi (`qwen2.5-3b-instruct`) -> Local Extractive Fallback | Higher reasoning accuracy for `<summary>` & graph extraction |
 
-Additional v4.0 router hardening:
+Additional v4.0/v4.1 router hardening:
+- **Per-target `extraPayload` & timeouts**: `gemini-4-hydrogen` (`timeoutMs: 18000`) and `gemini-3-flash-preview` (`timeoutMs: 15000`) inject `{ reasoning_effort: "low" }` by default to eliminate slow thinking stalls, while `gemma-4-31b-it` / `gemma-4-26b-a4b-it` omit `reasoning_effort` (unsupported, returns HTTP 400) with `timeoutMs: 25000`.
 - **`<observation>` & `<summary>` XML sanitization (`sanitizeObservationOrSummaryXml`)**: Cleans `<file>` and `<concept>` entries via `isNoisyScratchEntityName`, `CJK_CANONICAL_MAP`, and `normalizeUnicodeDashes`.
 - **Clean Local Extractive Fallback (`buildLocalExtractiveFallback`)**: Both `<summary>` and `<observation>` branches extract real file paths and concepts from `userMsg`, skip `/tmp/` and scratch files, and never inject hardcoded fake `~/.agentmemory/.env` or `agent-workflow` edges.
 - **`sanitizeGraphXmlOutput`**: Supports both self-closing (`<entity .../>`) and body-element (`<entity ...>...</entity>`, `<relationship ...>...</relationship>`) XML tags.
-- **`GET /` status JSON**: Reports `version: "4.0"`, `features`, `chains: { fast, accuracy }`, and `chain`.
+- **`GET /` status JSON**: Reports `version: "4.1"`, `features`, `chains: { fast, accuracy }`, and `chain`.
 - **Entrypoint guard**: `server.listen(...)` runs only when executed directly (`process.argv[1]`), allowing unit tests to import exported pure helpers without binding port `:3118`.
 
 ---

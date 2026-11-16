@@ -25,8 +25,8 @@ A **Hybrid Neuro-Symbolic Antigravity Skill (`agentmemory-graph-linker` v4.1)** 
 3. **Semantic Synonym Planning & Bi-Temporal Graph (`--suggest-merges`, `--merge-plan`, `--suggest-links`, `--apply-temporal`)**:
    - `--suggest-merges` scores structural/lexical synonym pairs at 0 LLM tokens (`scoreSynonymPair`); `--merge-plan` executes Hydrogen-approved merges across all 5 KV layers while bounding `node.aliases <= 10` and `sourceObservationIds <= 24` under `MAX_POSTINGS=192`.
    - `--suggest-links` bundles unlinked and low-degree `related_to`-only nodes with `mem:obs:*` observation excerpts and domain hubs; `--apply-temporal` persists rich typed relations (`implements`, `configures`, `replaces`, `caused_by`, `optimizes`, `fixes`, `depends_on`, `supersedes`, etc.) plus bi-temporal fields (`tvalid`, `tvalidEnd`, `isLatest`, `supersededBy`).
-4. **Task-Aware Smart AI Router v4.0 (`router/smart-router.mjs`)**:
-   - Routes `<observation>` / `any` requests through a fast, high-quota chain (`gemini-3.1-flash-lite-preview`, `gemini-flash-lite-latest`, `openai/gpt-oss-20b`, ...) and `<summary>` / `<entities>` / `graph` requests through an accuracy-first chain (`gemini-3.8-flash`, `gemini-flash-latest`, `openai/gpt-oss-120b`, `gemma-4-26b-a4b-it`, ...) before falling back to local Z Fold 3 targets and a zero-fail Local Extractive Fallback.
+4. **Task-Aware Smart AI Router v4.1 (`router/smart-router.mjs`)**:
+   - 14-tier failover chain: routes `<observation>` / `any` requests through a fast, high-quota chain (`gemini-3.1-flash-lite-preview`, `gemini-flash-lite-latest`, `openai/gpt-oss-20b`, `gemma-4-26b-a4b-it`, `gemma-4-31b-it`, ...) and `<summary>` / `<entities>` / `graph` requests through an accuracy-first chain (`gemini-4-hydrogen`, `gemini-3-flash-preview`, `gemini-3.8-flash`, `gemini-flash-latest`, `openai/gpt-oss-120b`, `gemma-4-31b-it`, ...) with `extraPayload: { reasoning_effort: "low" }` on Hydrogen/Gemini 3 Flash before falling back to local Z Fold 3 targets and a zero-fail Local Extractive Fallback.
    - Sanitizes `<observation>` and `<summary>` XML tags (`sanitizeObservationOrSummaryXml`), handles self-closing and body `<entity>`/`<relationship>` tags, extracts real files/concepts in local fallback without hardcoded `.env` edges, and exposes `GET /` `chains: { fast, accuracy }`.
 5. **Maintenance Lock, Audit, 5-Layer Dedup & Cold Graveyard (`--lock`, `--unlock`, `--audit`, `--dedup`, `--rename`, `--prune`, `--restore`, `--delete`)**:
    - `--lock` / `--unlock` freezes background LLM graph extraction via `~/.agentmemory/maintenance.lock` (`0ms`, `0` tokens); auto-locks during `--beautify` and `--optimize-ram`.
@@ -54,7 +54,7 @@ agentmemory-graph-linker/
 │           ├── edge-compactor.mjs                 # Read-budget simulator & safe edge compactor
 │           └── semantic-planner.mjs               # Synonym scoring, alias merging & bi-temporal links
 ├── router/
-│   ├── smart-router.mjs                           # Task-Aware Smart AI Router v4.0 (reads ~/.agentmemory/.env)
+│   ├── smart-router.mjs                           # Task-Aware Smart AI Router v4.1 (reads ~/.agentmemory/.env)
 │   └── com.agentmemory.smartrouter.plist.example  # macOS LaunchAgent template
 └── tests/
     ├── edge-compactor.test.mjs                    # node:test suite for budget math & safe compaction
@@ -128,6 +128,7 @@ node "$SCRIPT" --verify-json --strict
 - **v4.1 (2026-11-16)**:
   - **Token-Efficient Consolidation (`--suggest-merges`, `--suggest-links`, `--auto-safe`)**: Compact output default (`--full` restores verbose fields) strips redundant `sourceObservationIds` arrays, deduplicates hubs into a root `hubCatalog`, groups connected synonyms into multi-node `clusters`, and splits zero-risk morphological/compact merges (`--auto-safe` with numeric version guards).
   - **Budget-Aware Linking & One-Shot Cycle (`--pair-mode`, `--apply-and-compact`)**: Separates `trulyIsolatedCount` (`globalDegree === 0`) from `viewOnlyUnlinkedCount`, surfaces compactable `deg=2` hot-hub `hubLeafGroups` (`expectedNetReadDeltaPerPair: -4` / `-2`), runs merge + link + compact + verification with 1 deferred snapshot rebuild in `--apply-and-compact`, and suppresses `[OTel]`/`[iii]` CLI stdout chatter for pure JSON parsing.
+  - **14-Tier Smart AI Router v4.1 (`router/smart-router.mjs`)**: Added `gemini-4-hydrogen` (`reasoning_effort: "low"`), `gemini-3-flash-preview` (`reasoning_effort: "low"`), and `gemma-4-31b-it` (`14.4K RPD`, `timeoutMs: 25000`); prioritized Hydrogen/Gemini 3 Flash in Accuracy tier while keeping high-quota Lite/Groq/Gemma models first in Fast `<observation>` tier.
 - **v4.0 (2026-11-13)**:
   - **Hybrid Neuro-Symbolic Upgrade (Gemini 4 Hydrogen)**: Added `edge-compactor.mjs` (`--simulate-budget`, `--compact-edges [--apply]`), `semantic-planner.mjs` (`--suggest-merges`, `--merge-plan`, `--suggest-links`, `--apply-temporal`), and `--verify-json [--strict]`.
   - **Task-Aware Smart AI Router v4.0**: Added `FAST_MODEL_ORDER` vs `ACCURACY_MODEL_ORDER` (`selectTargetsForFormat`), added `gemini-flash-latest`, cleaned `<observation>` `buildLocalExtractiveFallback` (removed hardcoded `.env` edges), expanded `sanitizeGraphXmlOutput` for body tags, and added entrypoint guards + `tests/*.test.mjs`.

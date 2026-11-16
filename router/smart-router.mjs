@@ -5,8 +5,9 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 
 /**
- * AgentMemory 11-Tier Task-Aware Fault-Tolerant Smart AI Router (v4.0)
+ * AgentMemory 14-Tier Task-Aware Fault-Tolerant Smart AI Router (v4.1)
  * - Task-aware model tiering (fast high-quota for <observation>, accuracy-first for <summary> & <entities>)
+ * - Includes Gemini 4 Hydrogen, Gemini 3 Flash Preview (reasoning_effort: low), and Gemma 4 31B IT (14.4K RPD)
  * - Surrogate-safe UTF-16 prompt & fallback slicing (#1598)
  * - Truncated reply (finish_reason === "length" / unclosed XML) detection & automatic tier failover (#1495)
  * - Zero-Token Hallucination, Unicode dash & Scratch Noise Gate on <entities>, <observation>, and <summary> XML
@@ -218,6 +219,28 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY || envVars.GEMINI_API_KEY || "";
 
 const TARGETS = [
   {
+    name: "Gemini 4 Hydrogen (Google AI Studio - Deep Reasoning)",
+    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    headers: {
+      Authorization: `Bearer ${GEMINI_KEY}`,
+      "Content-Type": "application/json"
+    },
+    model: "gemini-4-hydrogen",
+    extraPayload: { reasoning_effort: "low" },
+    timeoutMs: 18000
+  },
+  {
+    name: "Gemini 3 Flash (Google AI Studio - Reasoning)",
+    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    headers: {
+      Authorization: `Bearer ${GEMINI_KEY}`,
+      "Content-Type": "application/json"
+    },
+    model: "gemini-3-flash-preview",
+    extraPayload: { reasoning_effort: "low" },
+    timeoutMs: 15000
+  },
+  {
     name: "Gemini 3.8 Flash (Google AI Studio)",
     url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
     headers: {
@@ -248,6 +271,16 @@ const TARGETS = [
     timeoutMs: 15000
   },
   {
+    name: "Gemma 4 31B IT (Google High-Quota Pool)",
+    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    headers: {
+      Authorization: `Bearer ${GEMINI_KEY}`,
+      "Content-Type": "application/json"
+    },
+    model: "gemma-4-31b-it",
+    timeoutMs: 25000
+  },
+  {
     name: "Gemma 4 26B MoE (Google High-Quota Fast Pool)",
     url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
     headers: {
@@ -255,7 +288,7 @@ const TARGETS = [
       "Content-Type": "application/json"
     },
     model: "gemma-4-26b-a4b-it",
-    timeoutMs: 15000
+    timeoutMs: 25000
   },
   {
     name: "Gemini 3.1 Flash Lite (Google AI Studio)",
@@ -322,17 +355,23 @@ const FAST_MODEL_ORDER = [
   "gemini-flash-lite-latest",
   "openai/gpt-oss-20b",
   "gemma-4-26b-a4b-it",
+  "gemma-4-31b-it",
   "qwen/qwen3.8-27b",
   "gemini-flash-latest",
   "gemini-3.8-flash",
+  "gemini-3-flash-preview",
+  "gemini-4-hydrogen",
   "openai/gpt-oss-120b",
   "qwen2.5-3b-instruct"
 ];
 
 const ACCURACY_MODEL_ORDER = [
+  "gemini-4-hydrogen",
+  "gemini-3-flash-preview",
   "gemini-3.8-flash",
   "gemini-flash-latest",
   "openai/gpt-oss-120b",
+  "gemma-4-31b-it",
   "gemma-4-26b-a4b-it",
   "gemini-3.1-flash-lite-preview",
   "gemini-flash-lite-latest",
@@ -931,7 +970,7 @@ const server = http.createServer(async (req, res) => {
     res.end(
       JSON.stringify({
         status: "ok",
-        version: "4.0",
+        version: "4.1",
         features: [
           "task-aware-model-tiering (fast-observation vs accuracy-summary-graph)",
           "surrogate-safe-truncation (#1598)",
@@ -1034,7 +1073,11 @@ const server = http.createServer(async (req, res) => {
   for (const target of selectedTargets) {
     if (isCoolingDown(target)) continue;
     try {
-      const payload = { ...sanitized, model: target.model };
+      const payload = {
+        ...(target.extraPayload || {}),
+        ...sanitized,
+        model: target.model
+      };
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), target.timeoutMs || 15000);
 
@@ -1088,7 +1131,7 @@ const isMain =
   Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
   server.listen(PORT, "127.0.0.1", () => {
-    console.log(`Smart AI Router v4.0 listening on http://127.0.0.1:${PORT}`);
+    console.log(`Smart AI Router v4.1 listening on http://127.0.0.1:${PORT}`);
   });
 }
 

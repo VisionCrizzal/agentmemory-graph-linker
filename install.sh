@@ -18,7 +18,7 @@ echo "    ✓ Skill installed at: $AGENTS_SKILL_DIR"
 echo "    ✓ Symlinked to:       $GEMINI_SKILL_DIR"
 echo "    ✓ Symlinked to:       $CLAUDE_SKILL_DIR"
 
-echo "==> Installing Smart AI Router v4.0 (reads from ~/.agentmemory/.env)..."
+echo "==> Installing Smart AI Router v4.1 (reads from ~/.agentmemory/.env)..."
 cp "$REPO_DIR/router/smart-router.mjs" "$AGENTMEMORY_DIR/smart-router.mjs"
 echo "    ✓ Copied smart-router.mjs to $AGENTMEMORY_DIR/smart-router.mjs"
 launchctl kickstart -k "gui/$(id -u)/com.agentmemory.smartrouter" 2>/dev/null || true

@@ -126,11 +126,24 @@ test("selectTargetsForFormat separates fast vs accuracy tiers and excludes dead 
   for (const fmt of ["summary", "graph", "entities", "temporal_graph"]) {
     const accTargets = selectTargetsForFormat(fmt);
     assert.deepEqual(
-      accTargets.slice(0, 4).map((t) => t.model),
-      ["gemini-3.8-flash", "gemini-flash-latest", "openai/gpt-oss-120b", "gemma-4-26b-a4b-it"],
+      accTargets.slice(0, 6).map((t) => t.model),
+      [
+        "gemini-4-hydrogen",
+        "gemini-3-flash-preview",
+        "gemini-3.8-flash",
+        "gemini-flash-latest",
+        "openai/gpt-oss-120b",
+        "gemma-4-31b-it"
+      ],
       `expected accuracy-first chain for format=${fmt}`
     );
   }
+
+  assert.equal(fastTargets.some((t) => t.model === "gemma-4-31b-it"), true);
+  assert.equal(fastTargets.indexOf(fastTargets.find((t) => t.model === "gemma-4-31b-it")), 4);
+  assert.equal(TARGETS.find((t) => t.model === "gemini-4-hydrogen")?.extraPayload?.reasoning_effort, "low");
+  assert.equal(TARGETS.find((t) => t.model === "gemini-3-flash-preview")?.extraPayload?.reasoning_effort, "low");
+  assert.equal(TARGETS.find((t) => t.model === "gemma-4-31b-it")?.extraPayload, undefined);
 });
 
 test("inspectAndCleanResponse rejects truncated replies and cleans valid XML formats", () => {

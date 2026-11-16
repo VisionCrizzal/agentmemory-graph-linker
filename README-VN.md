@@ -25,8 +25,8 @@ Bộ công cụ **Hybrid Neuro-Symbolic Antigravity Skill (`agentmemory-graph-li
 3. **Gộp Thực Thể Ngữ Nghĩa & Đồ Thị Bi-Temporal (`--suggest-merges`, `--merge-plan`, `--suggest-links`, `--apply-temporal`)**:
    - `--suggest-merges` chấm điểm các cặp đồng nghĩa/alias tốn 0 token (`scoreSynonymPair`); `--merge-plan` thực thi gộp 5 tầng KV theo phán đoán của Hydrogen, giới hạn `node.aliases <= 10` và `sourceObservationIds <= 24` để luôn dưới ngưỡng `MAX_POSTINGS=192`.
    - `--suggest-links` gom các node rời rạc / ít liên kết `related_to` kèm trích đoạn `mem:obs:*` và danh sách hub ứng viên; `--apply-temporal` ghi nhận các quan hệ giàu ngữ nghĩa (`implements`, `configures`, `replaces`, `caused_by`, `optimizes`, `fixes`, `depends_on`, `supersedes`, ...) cùng siêu dữ liệu thời gian (`tvalid`, `tvalidEnd`, `isLatest`, `supersededBy`).
-4. **Task-Aware Smart AI Router v4.0 (`router/smart-router.mjs`)**:
-   - Phân luồng thông minh: tác vụ `<observation>` / `any` đi qua chuỗi nhanh & hạn mức cao (`gemini-3.1-flash-lite-preview`, `gemini-flash-lite-latest`, `openai/gpt-oss-20b`, ...), còn `<summary>` / `<entities>` / `graph` ưu tiên độ chính xác cao (`gemini-3.8-flash`, `gemini-flash-latest`, `openai/gpt-oss-120b`, `gemma-4-26b-a4b-it`, ...) trước khi fallback xuống Z Fold 3 cục bộ và Local Extractive Fallback.
+4. **Task-Aware Smart AI Router v4.1 (`router/smart-router.mjs`)**:
+   - Chuỗi failover 14 tầng: tác vụ `<observation>` / `any` đi qua chuỗi nhanh & hạn mức cao (`gemini-3.1-flash-lite-preview`, `gemini-flash-lite-latest`, `openai/gpt-oss-20b`, `gemma-4-26b-a4b-it`, `gemma-4-31b-it`, ...), còn `<summary>` / `<entities>` / `graph` ưu tiên độ chính xác cao (`gemini-4-hydrogen`, `gemini-3-flash-preview`, `gemini-3.8-flash`, `gemini-flash-latest`, `openai/gpt-oss-120b`, `gemma-4-31b-it`, ...) kèm `extraPayload: { reasoning_effort: "low" }` cho Hydrogen/Gemini 3 Flash trước khi fallback xuống Z Fold 3 cục bộ và Local Extractive Fallback.
    - Làm sạch XML `<observation>` / `<summary>` (`sanitizeObservationOrSummaryXml`), hỗ trợ cả thẻ `<entity>` / `<relationship>` có thân thẻ, trích xuất file/concept thật trong fallback cục bộ (không gắn nhầm cạnh `~/.agentmemory/.env` giả), và trả `chains: { fast, accuracy }` qua `GET /`.
 5. **Khóa Bảo Trì, Kiểm Toán 0 Token, Khử Trùng 5 Tầng & Thùng Rác Lạnh (`--lock`, `--unlock`, `--audit`, `--dedup`, `--rename`, `--prune`, `--restore`, `--delete`)**:
    - `--lock` / `--unlock` đóng băng LLM trích xuất nền qua `~/.agentmemory/maintenance.lock` (`0ms`, `0` token); tự động khóa khi chạy `--beautify` và `--optimize-ram`.
@@ -54,7 +54,7 @@ agentmemory-graph-linker/
 │           ├── edge-compactor.mjs                 # Mô phỏng ngân sách đọc & nén cạnh dư thừa an toàn
 │           └── semantic-planner.mjs               # Chấm điểm đồng nghĩa, gộp alias & liên kết bi-temporal
 ├── router/
-│   ├── smart-router.mjs                           # Task-Aware Smart AI Router v4.0 (đọc key từ ~/.agentmemory/.env)
+│   ├── smart-router.mjs                           # Task-Aware Smart AI Router v4.1 (đọc key từ ~/.agentmemory/.env)
 │   └── com.agentmemory.smartrouter.plist.example  # Mẫu LaunchAgent tự chạy ngầm trên macOS
 └── tests/
     ├── edge-compactor.test.mjs                    # Bộ test node:test cho mô phỏng ngân sách & nén cạnh
@@ -128,6 +128,7 @@ node "$SCRIPT" --verify-json --strict
 - **v4.1 (2026-11-16)**:
   - **Tối ưu token khi gom & lọc ứng viên (`--suggest-merges`, `--suggest-links`, `--auto-safe`)**: Mặc định xuất payload gọn (`--full` để lấy chi tiết), bỏ mảng `sourceObservationIds` dư thừa, gom `hubCatalog` một lần ở root, gom cặp đồng nghĩa thành cụm N-node (`clusters`), tách sẵn các ca an toàn tuyệt đối (`--auto-safe` có chốt chặn lệch số phiên bản/tên file), và tắt nhiễu `[OTel]`/`[iii]` trên stdout để parse JSON trực tiếp.
   - **Nhận diện cặp lá hạ budget & pipeline 1 lệnh (`--pair-mode`, `--apply-and-compact`)**: Tách rõ `trulyIsolatedCount` (`globalDegree === 0`) với node chỉ khuất khỏi top-500 (`viewOnlyUnlinkedCount`), gợi ý các cụm lá `deg=2` dính `hotHub` qua cạnh yếu (`hubLeafGroups`, dự báo `-4` hoặc `-2` reads ròng), và gom `merge + link + compact + 1 lần rebuild snapshot + verify` vào một lệnh `--apply-and-compact` duy nhất.
+  - **14-Tier Smart AI Router v4.1 (`router/smart-router.mjs`)**: Bổ sung `gemini-4-hydrogen` (`reasoning_effort: "low"`), `gemini-3-flash-preview` (`reasoning_effort: "low"`) và `gemma-4-31b-it` (`14.4K RPD`, `timeoutMs: 25000`); ưu tiên Hydrogen/Gemini 3 Flash ở luồng Accuracy và giữ model quota cao lên đầu luồng Fast `<observation>`.
 - **v4.0 (2026-11-13)**:
   - **Nâng cấp Hybrid Neuro-Symbolic (Gemini 4 Hydrogen)**: Bổ sung `edge-compactor.mjs` (`--simulate-budget`, `--compact-edges [--apply]`), `semantic-planner.mjs` (`--suggest-merges`, `--merge-plan`, `--suggest-links`, `--apply-temporal`) và cổng kiểm định `--verify-json [--strict]`.
   - **Task-Aware Smart AI Router v4.0**: Tách `FAST_MODEL_ORDER` và `ACCURACY_MODEL_ORDER` (`selectTargetsForFormat`), bổ sung `gemini-flash-latest`, sửa lỗi fallback `<observation>` bị gán cứng `.env`, hỗ trợ làm sạch thẻ XML `<entity>`/`<relationship>` có thân thẻ, và thêm entrypoint guard + bộ `tests/*.test.mjs`.
