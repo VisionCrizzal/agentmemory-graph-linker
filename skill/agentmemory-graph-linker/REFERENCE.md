@@ -1,4 +1,4 @@
-# AgentMemory Knowledge Graph Linker Reference (v4.0)
+# AgentMemory Knowledge Graph Linker Reference (v4.1)
 
 ## 1. The `maxReads: 4096` KV Budget Architecture
 
@@ -171,6 +171,18 @@ Additional v4.0 router hardening:
 ---
 
 ## 9. Changelog
+
+### v4.1 (2026-11-16) — Token-Efficient Consolidation & One-Shot Compaction Cycle
+- **Compact Candidate Serialization & Clean JSON Stdout (`--quiet` / `--json` / `--minify`)**:
+  - `findSemanticDuplicateCandidates` and `buildSemanticLinkBatch` default to `compact: true` (`--full` opts back into verbose fields): strips redundant 24-ID `sourceObservationIds` dumps from candidate summaries and replaces per-item duplicated `candidateHubs` objects with a single root `hubCatalog` + per-item `candidateHubIds`.
+  - Disables noisy `[OTel]` SDK emission by default (`otel: { enabled: false }`) and filters `[iii]`/`[OTel]` stdout debug chatter across JSON modes (`installSdkLogGuard`), enabling direct `JSON.parse` / `jq` consumption.
+- **Connected-Component Synonym Clustering & `--auto-safe` Classification (`semantic-planner.mjs`)**:
+  - Groups duplicate pairs into multi-node `clusters` with a single `canonicalWinner`, `mergeNodes`, and ready-to-run `planItems` to avoid multi-round pairwise merge drift.
+  - Adds `classifyAutoSafeMerge` (`compact_match_safe`, `plural_singular_safe`, `corroborated_high_sim` with numeric/version token mismatch and disjoint-basename guards) exposed via `--suggest-merges --auto-safe`, `--merge-plan --auto-safe`, `--dedup --auto-safe`, and `--apply-and-compact --auto-safe`.
+- **Global Connectivity Distinction & `hubLeafGroups` (`--suggest-links --pair-mode`)**:
+  - Separates `trulyIsolatedCount` (`globalDegree === 0`) from `viewOnlyUnlinkedCount` (`alreadyConnectedGlobally: true`), attaches `budget` telemetry, and discovers compactable `deg=2` leaf clusters attached to `w <= 0.45` hot-hub edges (`expectedNetReadDeltaPerPair: -4` when `hubDeg >= 4` & in-page, or `-2`).
+- **One-Shot Pipeline (`--apply-and-compact` / `--cycle` / `runApplyAndCompactCycle`)**:
+  - Runs optional `--auto-safe` merges, explicit `--merge-plan`, temporal `--links`, `compactRedundantEdges`, **one** deferred `triggerSnapshotRebuild`, and post-budget/verification reporting inside a single worker session (`skipSnapshot: true` on intermediate steps).
 
 ### v4.0 (2026-11-13) — Gemini 4 Hydrogen Hybrid Neuro-Symbolic Upgrade
 - **Read-Budget Simulator & Safe Edge Compaction (`edge-compactor.mjs`)**: Added `--simulate-budget` and `--compact-edges [--apply]` to keep `POST /agentmemory/graph/query` under `maxReads: 4096` without ever dropping endpoints below `minDegree >= 2`.

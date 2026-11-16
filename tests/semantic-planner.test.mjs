@@ -7,11 +7,14 @@ import path from "node:path";
 import {
   MAX_NODE_ALIASES,
   MAX_NODE_SOURCE_OBS,
+  PLANNER_VERSION,
   scoreSynonymPair,
+  classifyAutoSafeMerge,
   findSemanticDuplicateCandidates,
   applySemanticMergePlan,
   buildSemanticLinkBatch,
-  applyTemporalLinks
+  applyTemporalLinks,
+  runApplyAndCompactCycle
 } from "../skill/agentmemory-graph-linker/scripts/semantic-planner.mjs";
 
 function createSemanticMockEngine({
@@ -188,7 +191,7 @@ test("findSemanticDuplicateCandidates scans mock engine, skips exact duplicates 
   const res = await findSemanticDuplicateCandidates({ engine }, { minScore: 0.45, limit: 20 });
 
   assert.equal(res.status, "candidates_ready");
-  assert.equal(res.version, "4.0");
+  assert.equal(res.version, PLANNER_VERSION);
   // Scratch node excluded from scanned total
   assert.equal(res.totalNodesScanned, 5);
   assert.ok(res.candidateCount >= 1);
@@ -425,4 +428,213 @@ test("buildSemanticLinkBatch gathers excerpts & hubs, and applyTemporalLinks val
 
   const hist = await engine.kvGet("mem:graph:edge-history", "ge_old_router");
   assert.equal(hist.isLatest, false);
+});
+
+test("findSemanticDuplicateCandidates clusters connected synonyms, builds autoSafePlan, and guards numeric versions", async () => {
+  const nodes = [
+    // Cluster 1: singular/plural + hyphen variant -> connected component of 3 nodes
+    { id: "gn_1", type: "concept", name: "plugin script", sourceObservationIds: ["o1"] },
+    { id: "gn_2", type: "concept", name: "plugin scripts", sourceObservationIds: ["o1"] },
+    { id: "gn_3", type: "concept", name: "plugin-script runner", sourceObservationIds: ["o1"] },
+    // Distinct numeric versions -> MUST NEVER be autoSafe
+    { id: "gn_v15", type: "concept", name: "macOS 15", sourceObservationIds: ["o2"] },
+    { id: "gn_v26", type: "concept", name: "macOS 26", sourceObservationIds: ["o2"] },
+    // Hub giving gn_1 higher degree so it wins deterministically
+    { id: "gn_hub", type: "project", name: "AgentMemory", sourceObservationIds: [] }
+  ];
+  const edges = [
+    { id: "e_1h", sourceNodeId: "gn_1", targetNodeId: "gn_hub", type: "uses", isLatest: true }
+  ];
+
+  const engine = createSemanticMockEngine({ nodes, edges });
+  const compactRes = await findSemanticDuplicateCandidates({ engine }, { minScore: 0.55, limit: 20 });
+
+  assert.equal(compactRes.compact, true);
+  assert.ok(compactRes.clusterCount >= 1);
+  assert.ok(compactRes.autoSafeCount >= 1);
+  assert.ok(
+    compactRes.autoSafePlan.some((p) => p.keep === "gn_1" && p.merge === "gn_2"),
+    "expected plural pair plugin scripts -> plugin script in autoSafePlan"
+  );
+  assert.equal(
+    compactRes.autoSafePlan.some((p) => (p.keep === "gn_v15" && p.merge === "gn_v26") || (p.keep === "gn_v26" && p.merge === "gn_v15")),
+    false,
+    "numeric version pairs must never be autoSafe"
+  );
+  // Compact format omits raw sourceObservationIds arrays on candidates
+  for (const cand of compactRes.candidates) {
+    assert.equal("sourceObservationIds" in cand.nodeA, false);
+    assert.equal("sourceObservationIds" in cand.nodeB, false);
+  }
+
+  // Full & clustersOnly flags work cleanly
+  const fullRes = await findSemanticDuplicateCandidates(
+    { engine },
+    { minScore: 0.55, limit: 20, compact: false }
+  );
+  assert.equal("sourceObservationIds" in fullRes.candidates[0].nodeA, true);
+
+  const clustersOnlyRes = await findSemanticDuplicateCandidates(
+    { engine },
+    { minScore: 0.55, limit: 20, clustersOnly: true }
+  );
+  assert.equal(clustersOnlyRes.candidates.length, 0);
+  assert.ok(clustersOnlyRes.clusters.length >= 1);
+  assert.ok(classifyAutoSafeMerge !== undefined);
+});
+
+test("buildSemanticLinkBatch separates trulyIsolated vs viewOnlyUnlinked, deduplicates hubCatalog, and surfaces compactable hubLeafGroups", async () => {
+  const nodes = [
+    { id: "n_hub", type: "file", name: "Info.plist", sourceObservationIds: ["o1"] },
+    { id: "n_leaf_a", type: "concept", name: "Direct3D11 troubleshooting", sourceObservationIds: ["o1"] },
+    { id: "n_leaf_b", type: "concept", name: "plist instrumentation", sourceObservationIds: ["o2"] },
+    { id: "n_anchor_a", type: "concept", name: "DirectX debugging", sourceObservationIds: [] },
+    { id: "n_anchor_b", type: "concept", name: "Wrapper plist audit", sourceObservationIds: [] },
+    { id: "n_iso", type: "concept", name: "Truly isolated node", sourceObservationIds: ["o1"] },
+    { id: "n_view_only", type: "concept", name: "View-only unlinked node", sourceObservationIds: [] },
+    { id: "n_outside", type: "project", name: "Outside view peer", sourceObservationIds: [] }
+  ];
+  const edges = [
+    // Hub (deg=3) has w=0.4 related_to edges to leafA and leafB (both deg=2)
+    { id: "e_ha", sourceNodeId: "n_hub", targetNodeId: "n_leaf_a", type: "related_to", weight: 0.4, isLatest: true },
+    { id: "e_hb", sourceNodeId: "n_hub", targetNodeId: "n_leaf_b", type: "related_to", weight: 0.4, isLatest: true },
+    { id: "e_ho", sourceNodeId: "n_hub", targetNodeId: "n_outside", type: "uses", weight: 0.9, isLatest: true },
+    { id: "e_aa", sourceNodeId: "n_anchor_a", targetNodeId: "n_leaf_a", type: "uses", weight: 0.9, isLatest: true },
+    { id: "e_ab", sourceNodeId: "n_anchor_b", targetNodeId: "n_leaf_b", type: "uses", weight: 0.9, isLatest: true },
+    // n_view_only has an edge ONLY outside viewNodes -> viewDegree=0 but globalDegree=1
+    { id: "e_vo", sourceNodeId: "n_view_only", targetNodeId: "n_outside", type: "uses", weight: 0.9, isLatest: true }
+  ];
+  const viewNodes = nodes.filter((n) => n.id !== "n_outside");
+  const viewEdges = edges.filter((e) => e.id !== "e_vo" && e.id !== "e_ho");
+  const observationsBySession = {
+    s1: [
+      { id: "o1", title: "D3D11 check", narrative: "Check Direct3D11 DXVK plist env vars.", timestamp: "2026-11-15T10:00:00Z" },
+      { id: "o2", title: "WINEDEBUG plist", narrative: "Inspect WINEDEBUG instrumentation in Info.plist.", timestamp: "2026-11-15T11:00:00Z" }
+    ]
+  };
+
+  const engine = createSemanticMockEngine({ nodes, edges, observationsBySession });
+  const batch = await buildSemanticLinkBatch(
+    { engine, queryGraph: async () => ({ nodes: viewNodes, edges: viewEdges }) },
+    { limit: 20, compact: true }
+  );
+
+  assert.equal(batch.version, PLANNER_VERSION);
+  assert.equal(batch.compact, true);
+  assert.equal(batch.trulyIsolatedCount, 1);
+  assert.equal(batch.viewOnlyUnlinkedCount, 1);
+  assert.ok(batch.hubCatalog && typeof batch.hubCatalog === "object");
+  assert.equal(batch.items[0].id, "n_iso");
+  assert.equal(batch.items[0].trulyIsolated, true);
+  assert.ok(Array.isArray(batch.items[0].candidateHubIds));
+  assert.equal("candidateHubs" in batch.items[0], false);
+
+  const viewOnlyItem = batch.items.find((i) => i.id === "n_view_only");
+  assert.equal(viewOnlyItem?.alreadyConnectedGlobally, true);
+  assert.equal(viewOnlyItem?.globalDegree, 1);
+
+  assert.ok(batch.hubLeafGroupCount >= 1);
+  const plistGroup = batch.hubLeafGroups.find((g) => g.groupType === "shared_hub" && g.hub.id === "n_hub");
+  assert.ok(plistGroup, "expected shared_hub group for Info.plist");
+  assert.equal(plistGroup.expectedNetReadDeltaPerPair, -2);
+  assert.deepEqual(plistGroup.leaves.map((l) => l.id).sort(), ["n_leaf_a", "n_leaf_b"]);
+
+  // pairMode focuses only on trulyIsolated + hubLeafGroups
+  const pairBatch = await buildSemanticLinkBatch(
+    { engine, queryGraph: async () => ({ nodes: viewNodes, edges: viewEdges }) },
+    { limit: 20, pairMode: true }
+  );
+  assert.equal(pairBatch.pairMode, true);
+  assert.equal(pairBatch.items.length, 1);
+  assert.equal(pairBatch.items[0].id, "n_iso");
+  assert.ok(pairBatch.hubLeafGroups.length >= 1);
+});
+
+test("runApplyAndCompactCycle executes autoSafe merges, temporal links, edge compaction, single snapshot rebuild, and budget diff", async () => {
+  const nodes = [
+    { id: "n_hub", type: "file", name: "Info.plist", sourceObservationIds: [] },
+    { id: "n_leaf_a", type: "concept", name: "Direct3D11 troubleshooting", sourceObservationIds: ["o1"] },
+    { id: "n_leaf_b", type: "concept", name: "plist instrumentation", sourceObservationIds: ["o1"] },
+    { id: "n_anchor_a", type: "concept", name: "DirectX debugging", sourceObservationIds: [] },
+    { id: "n_anchor_b", type: "concept", name: "Wrapper audit", sourceObservationIds: [] },
+    { id: "n_dup_s", type: "concept", name: "script runner", sourceObservationIds: ["o1"] },
+    { id: "n_dup_p", type: "concept", name: "script runners", sourceObservationIds: ["o1"] }
+  ];
+  const edges = [
+    { id: "e_ha", sourceNodeId: "n_hub", targetNodeId: "n_leaf_a", type: "related_to", weight: 0.4, isLatest: true },
+    { id: "e_hb", sourceNodeId: "n_hub", targetNodeId: "n_leaf_b", type: "related_to", weight: 0.4, isLatest: true },
+    { id: "e_ho", sourceNodeId: "n_hub", targetNodeId: "n_anchor_a", type: "uses", weight: 0.9, isLatest: true },
+    { id: "e_ho2", sourceNodeId: "n_hub", targetNodeId: "n_anchor_b", type: "uses", weight: 0.9, isLatest: true },
+    { id: "e_aa", sourceNodeId: "n_anchor_a", targetNodeId: "n_leaf_a", type: "uses", weight: 0.9, isLatest: true },
+    { id: "e_ab", sourceNodeId: "n_anchor_b", targetNodeId: "n_leaf_b", type: "uses", weight: 0.9, isLatest: true },
+    { id: "e_d1", sourceNodeId: "n_dup_s", targetNodeId: "n_anchor_b", type: "uses", weight: 0.9, isLatest: true },
+    { id: "e_d2", sourceNodeId: "n_dup_p", targetNodeId: "n_anchor_b", type: "uses", weight: 0.9, isLatest: true }
+  ];
+
+  const engine = createSemanticMockEngine({ nodes, edges });
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agm-cycle-test-"));
+  const graveyardPath = path.join(tmpDir, "graveyard.jsonl");
+  let rebuildCount = 0;
+
+  try {
+    const queryFn = async () => {
+      const liveNodes = await engine.kvList("mem:graph:nodes");
+      const liveEdges = await engine.kvList("mem:graph:edges");
+      return { nodes: liveNodes, edges: liveEdges, totalNodes: liveNodes.length, totalEdges: liveEdges.length, truncated: false };
+    };
+
+    // Dry run should mutate nothing
+    const dryCycle = await runApplyAndCompactCycle(
+      {
+        engine,
+        secret: "mock-secret",
+        graveyardPath,
+        queryGraph: queryFn,
+        applyDirectXmlLinks: async () => ({ success: true, edgesAdded: 0, nodesAdded: 0 }),
+        rebuildSnapshot: async () => {
+          rebuildCount += 1;
+        }
+      },
+      {
+        dryRun: true,
+        autoSafeMerges: true,
+        targetMaxReads: 1,
+        links: [{ source: "n_leaf_a", target: "n_leaf_b", type: "uses", weight: 0.9 }]
+      }
+    );
+    assert.equal(dryCycle.status, "dry_run");
+    assert.equal(rebuildCount, 0);
+    assert.equal(dryCycle.merges.autoSafeCandidateCount, 1);
+
+    // Live cycle: auto-safe merge + leaf link -> immediate compaction of both hub weak edges + 1 snapshot rebuild
+    const liveCycle = await runApplyAndCompactCycle(
+      {
+        engine,
+        secret: "mock-secret",
+        graveyardPath,
+        queryGraph: queryFn,
+        applyDirectXmlLinks: async () => ({ success: true, edgesAdded: 0, nodesAdded: 0 }),
+        rebuildSnapshot: async () => {
+          rebuildCount += 1;
+        }
+      },
+      {
+        dryRun: false,
+        autoSafeMerges: true,
+        targetMaxReads: 1,
+        links: [{ source: "n_leaf_a", target: "n_leaf_b", type: "uses", weight: 0.9 }],
+        runVerifyFn: async () => ({ status: "verified" })
+      }
+    );
+
+    assert.equal(liveCycle.status, "cycle_completed");
+    assert.equal(rebuildCount, 1, "snapshot must be rebuilt once per cycle");
+    assert.equal(liveCycle.merges.mergedCount, 1);
+    assert.equal(liveCycle.links.appliedEdgesCount, 1);
+    assert.equal(liveCycle.compaction.compactedCount, 2);
+    assert.ok(liveCycle.budget.readsDelta < 0, `expected negative readsDelta, got ${liveCycle.budget.readsDelta}`);
+    assert.equal(liveCycle.verification.status, "verified");
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });

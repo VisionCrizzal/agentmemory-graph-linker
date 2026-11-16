@@ -1,5 +1,5 @@
 /**
- * AgentMemory Semantic Planner (v4.0 — Gemini 4 Hydrogen Neuro-Symbolic Extension)
+ * AgentMemory Semantic Planner (v4.1 — Gemini 4 Hydrogen Neuro-Symbolic Extension)
  *
  * Zero-side-effect module providing:
  * 1. scoreSynonymPair(nodeA, nodeB, neighborsById)
@@ -7,12 +7,22 @@
  * 3. applySemanticMergePlan(deps, planItems, options)
  * 4. buildSemanticLinkBatch(deps, options)
  * 5. applyTemporalLinks(deps, triples, options)
+ * 6. runApplyAndCompactCycle(deps, options)
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import {
+  estimateSubgraphReadCost,
+  isLowWeightHeuristicEdge,
+  compactRedundantEdges,
+  runBudgetSimulation,
+  triggerSnapshotRebuild as compactorRebuildSnapshot
+} from "./edge-compactor.mjs";
+
+export const PLANNER_VERSION = "4.1";
 
 const HOME = os.homedir();
 const DEFAULT_AGENTMEMORY_DIR =
@@ -615,29 +625,29 @@ export function scoreSynonymPair(nodeA, nodeB, neighborsById = new Map()) {
   return scorePreparedPair(prepA, prepB, neighborsById);
 }
 
-function chooseWinnerAndAliases(nodeA, nodeB, degreeMap) {
-  const scoreNode = (n) => {
-    const rawName = String(n?.name || "");
-    const deg = degreeMap.get(n.id) || 0;
-    const hasXml = /&(?:quot|lt|gt|amp|apos|#\d+|#x[\da-f]+);/i.test(rawName);
-    const hasUnicodeDash = /[\u2010-\u2015\u2212\u00ad\u200b-\u200d\ufeff]/.test(rawName);
-    const isImmune = IMMUNE_NODE_TYPES.has(n.type);
-    const obsLen = Array.isArray(n.sourceObservationIds) ? n.sourceObservationIds.length : 0;
-    const occ = Number(n.properties?.occurrences) || 1;
-    const cleanLen = normalizeSemanticText(rawName).length;
-    return (
-      (hasXml ? -500 : 200) +
-      (hasUnicodeDash ? -150 : 100) +
-      (isImmune ? 120 : 0) +
-      deg * 8 +
-      occ * 4 +
-      obsLen * 2 +
-      Math.min(cleanLen, 60) * 0.25
-    );
-  };
+function scoreWinnerNode(node, degreeMap) {
+  const rawName = String(node?.name || "");
+  const deg = degreeMap.get(node.id) || 0;
+  const hasXml = /&(?:quot|lt|gt|amp|apos|#\d+|#x[\da-f]+);/i.test(rawName);
+  const hasUnicodeDash = /[\u2010-\u2015\u2212\u00ad\u200b-\u200d\ufeff]/.test(rawName);
+  const isImmune = IMMUNE_NODE_TYPES.has(node.type);
+  const obsLen = Array.isArray(node.sourceObservationIds) ? node.sourceObservationIds.length : 0;
+  const occ = Number(node.properties?.occurrences) || 1;
+  const cleanLen = normalizeSemanticText(rawName).length;
+  return (
+    (hasXml ? -500 : 200) +
+    (hasUnicodeDash ? -150 : 100) +
+    (isImmune ? 120 : 0) +
+    deg * 8 +
+    occ * 4 +
+    obsLen * 2 +
+    Math.min(cleanLen, 60) * 0.25
+  );
+}
 
-  const sA = scoreNode(nodeA);
-  const sB = scoreNode(nodeB);
+function chooseWinnerAndAliases(nodeA, nodeB, degreeMap) {
+  const sA = scoreWinnerNode(nodeA, degreeMap);
+  const sB = scoreWinnerNode(nodeB, degreeMap);
   const aWins = sA > sB || (sA === sB && String(nodeA.id) <= String(nodeB.id));
   const winner = aWins ? nodeA : nodeB;
   const loser = aWins ? nodeB : nodeA;
@@ -670,22 +680,248 @@ function chooseWinnerAndAliases(nodeA, nodeB, degreeMap) {
   };
 }
 
-function summarizeCandidateNode(node, degreeMap) {
-  return {
+function summarizeCandidateNode(node, degreeMap, compact = true) {
+  const obsLen = Array.isArray(node.sourceObservationIds) ? node.sourceObservationIds.length : 0;
+  const baseSummary = {
     id: node.id,
     type: node.type,
     name: node.name,
+    degree: degreeMap.get(node.id) || 0
+  };
+  if (compact) {
+    return obsLen > 0 ? { ...baseSummary, obsCount: obsLen } : baseSummary;
+  }
+  return {
+    ...baseSummary,
     aliases: Array.isArray(node.aliases) ? node.aliases.slice(0, MAX_NODE_ALIASES) : [],
-    degree: degreeMap.get(node.id) || 0,
     sourceObservationIds: Array.isArray(node.sourceObservationIds)
       ? node.sourceObservationIds.slice(0, MAX_NODE_SOURCE_OBS)
       : []
   };
 }
 
+function extractNumericTokens(str) {
+  const matches = String(str || "").match(/\b\d+(?:\.\d+)*\b/g);
+  return matches ? matches.join("|") : "";
+}
+
+function isSingularPluralMatch(tokensA, tokensB) {
+  if (!Array.isArray(tokensA) || !Array.isArray(tokensB)) return false;
+  if (tokensA.length === 0 || tokensA.length !== tokensB.length) return false;
+
+  const isPluralPair = (w1, w2) => {
+    if (w1 === w2) return false;
+    const [shortW, longW] = w1.length <= w2.length ? [w1, w2] : [w2, w1];
+    if (shortW.length < 3 || /[0-9]/.test(shortW)) return false;
+    if (shortW + "s" === longW && !shortW.endsWith("s")) return true;
+    if (
+      shortW + "es" === longW &&
+      /(?:s|x|z|ch|sh|o)$/.test(shortW)
+    ) {
+      return true;
+    }
+    return shortW.endsWith("y") && shortW.slice(0, -1) + "ies" === longW;
+  };
+
+  let diffCount = 0;
+  for (let i = 0; i < tokensA.length; i++) {
+    if (tokensA[i] === tokensB[i]) continue;
+    if (!isPluralPair(tokensA[i], tokensB[i])) return false;
+    diffCount += 1;
+  }
+  return diffCount === 1;
+}
+
+/**
+ * Classifies whether a duplicate pair can be safely merged without LLM review.
+ */
+export function classifyAutoSafeMerge(nodeA, nodeB, prepA, prepB, sim) {
+  if (!nodeA || !nodeB || !prepA || !prepB || !sim) {
+    return { autoSafe: false, autoReason: null };
+  }
+  if (nodeA.type !== nodeB.type) {
+    return { autoSafe: false, autoReason: null };
+  }
+  if (extractNumericTokens(prepA.base) !== extractNumericTokens(prepB.base)) {
+    return { autoSafe: false, autoReason: null };
+  }
+  if (hasDisjointFileBasenames(prepA, prepB)) {
+    return { autoSafe: false, autoReason: null };
+  }
+  if (nodeA.type === "file" && prepA.compact !== prepB.compact) {
+    const sameStem = prepA.stem && prepA.stem.toLowerCase() === prepB.stem.toLowerCase();
+    const hasSupport = (sim.sharedObs?.length || 0) > 0 || (sim.sharedNeighbors?.length || 0) > 0;
+    if (!(sameStem && hasSupport && sim.score >= 0.9)) {
+      return { autoSafe: false, autoReason: null };
+    }
+  }
+  const compactExact = Boolean(prepA.compact && prepA.compact.length >= 3 && prepA.compact === prepB.compact);
+  if (IMMUNE_NODE_TYPES.has(nodeA.type) && !compactExact) {
+    return { autoSafe: false, autoReason: null };
+  }
+  if (compactExact && sim.score >= 0.65) {
+    return { autoSafe: true, autoReason: "compact_match_safe" };
+  }
+  const hasCorroboration =
+    (sim.sharedObs?.length || 0) > 0 || (sim.sharedNeighbors?.length || 0) > 0;
+  if (
+    isSingularPluralMatch(prepA.rawTokens, prepB.rawTokens) &&
+    (prepA.rawTokens.length >= 2 || hasCorroboration) &&
+    sim.score >= 0.55
+  ) {
+    return { autoSafe: true, autoReason: "plural_singular_safe" };
+  }
+  if (sim.score >= 0.9 && hasCorroboration) {
+    return { autoSafe: true, autoReason: "corroborated_high_sim" };
+  }
+  return { autoSafe: false, autoReason: null };
+}
+
+function buildDuplicateClusters(pairEntries, nodeById, degreeMap) {
+  const adj = new Map();
+  const bestEdgeBetween = new Map();
+  const pairKey = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+
+  for (const entry of pairEntries) {
+    const idA = entry.rawNodeA.id;
+    const idB = entry.rawNodeB.id;
+    if (!adj.has(idA)) adj.set(idA, new Set());
+    if (!adj.has(idB)) adj.set(idB, new Set());
+    adj.get(idA).add(idB);
+    adj.get(idB).add(idA);
+    const k = pairKey(idA, idB);
+    const prev = bestEdgeBetween.get(k);
+    if (!prev || entry.score > prev.score) bestEdgeBetween.set(k, entry);
+  }
+
+  const visited = new Set();
+  const clusters = [];
+  const autoSafePlan = [];
+  const claimedMergeIds = new Set();
+  let clusterIdx = 0;
+
+  for (const entry of pairEntries) {
+    const startId = entry.rawNodeA.id;
+    if (visited.has(startId)) continue;
+
+    const compIds = [];
+    const queue = [startId];
+    visited.add(startId);
+    while (queue.length > 0) {
+      const cur = queue.shift();
+      compIds.push(cur);
+      for (const nxt of adj.get(cur) || []) {
+        if (!visited.has(nxt)) {
+          visited.add(nxt);
+          queue.push(nxt);
+        }
+      }
+    }
+    if (compIds.length < 2) continue;
+
+    const compNodes = compIds
+      .map((id) => nodeById.get(id))
+      .filter(Boolean)
+      .sort((a, b) => {
+        const diff = scoreWinnerNode(b, degreeMap) - scoreWinnerNode(a, degreeMap);
+        return diff !== 0 ? diff : String(a.id).localeCompare(String(b.id));
+      });
+    if (compNodes.length < 2) continue;
+
+    clusterIdx += 1;
+    const winner = compNodes[0];
+    const canonicalName = normalizeSemanticText(winner.name);
+    const losers = compNodes.slice(1);
+
+    let maxScore = 0;
+    let minScore = 1;
+    let autoSafeCount = 0;
+    const reasonSet = new Set();
+    const mergeNodes = [];
+    const planItems = [];
+
+    for (const loser of losers) {
+      const directPair = bestEdgeBetween.get(pairKey(winner.id, loser.id));
+      let bestPair = directPair;
+      if (!bestPair) {
+        for (const member of compNodes) {
+          if (member.id === loser.id) continue;
+          const alt = bestEdgeBetween.get(pairKey(member.id, loser.id));
+          if (alt && (!bestPair || alt.score > bestPair.score)) bestPair = alt;
+        }
+      }
+      const pairScore = bestPair?.score ?? 0;
+      const isDirectAutoSafe = Boolean(directPair?.autoSafe);
+      const autoReason = directPair?.autoReason || null;
+      if (pairScore > maxScore) maxScore = pairScore;
+      if (pairScore < minScore) minScore = pairScore;
+      if (isDirectAutoSafe) autoSafeCount += 1;
+      for (const r of bestPair?.reasons || []) reasonSet.add(r);
+
+      mergeNodes.push({
+        id: loser.id,
+        type: loser.type,
+        name: loser.name,
+        degree: degreeMap.get(loser.id) || 0,
+        score: pairScore,
+        autoSafe: isDirectAutoSafe,
+        ...(autoReason ? { autoReason } : {})
+      });
+      const planItem = {
+        keep: winner.id,
+        merge: loser.id,
+        canonicalName
+      };
+      planItems.push(planItem);
+
+      if (isDirectAutoSafe && !claimedMergeIds.has(loser.id)) {
+        claimedMergeIds.add(loser.id);
+        autoSafePlan.push({
+          ...planItem,
+          keepName: canonicalName,
+          mergeName: loser.name,
+          score: pairScore,
+          reason: autoReason
+        });
+      }
+    }
+
+    const allAutoSafe = autoSafeCount === losers.length;
+    clusters.push({
+      clusterId: `cluster_${clusterIdx}`,
+      size: compNodes.length,
+      winner: {
+        id: winner.id,
+        type: winner.type,
+        name: winner.name,
+        canonicalName,
+        degree: degreeMap.get(winner.id) || 0
+      },
+      mergeNodes,
+      maxScore,
+      minScore,
+      allAutoSafe,
+      autoSafeCount,
+      reasons: Array.from(reasonSet).slice(0, 6),
+      planItems
+    });
+  }
+
+  clusters.sort(
+    (a, b) =>
+      Number(b.allAutoSafe) - Number(a.allAutoSafe) ||
+      b.maxScore - a.maxScore ||
+      b.size - a.size ||
+      String(a.winner.id).localeCompare(String(b.winner.id))
+  );
+
+  return { clusters, autoSafePlan };
+}
+
 /**
  * Scans mem:graph:nodes & mem:graph:edges via deps.engine, skips exact duplicates,
- * and returns top non-exact synonym/alias candidate pairs for Gemini 4 Hydrogen review.
+ * groups connected synonym pairs into clusters, splits zero-risk auto-safe merges,
+ * and returns compact candidate batches for Hydrogen review.
  */
 export async function findSemanticDuplicateCandidates(deps, options = {}) {
   const engine = deps?.engine;
@@ -694,6 +930,9 @@ export async function findSemanticDuplicateCandidates(deps, options = {}) {
   const limit = Math.max(1, Number(options.limit ?? 50));
   const minScore = Number(options.minScore ?? 0.45);
   const includeCrossType = options.includeCrossType !== false;
+  const compact = options.compact !== false;
+  const autoSafeOnly = Boolean(options.autoSafeOnly);
+  const clustersOnly = Boolean(options.clustersOnly);
 
   const [nodesRaw, edgesRaw] = await Promise.all([
     engine.kvList("mem:graph:nodes"),
@@ -706,6 +945,7 @@ export async function findSemanticDuplicateCandidates(deps, options = {}) {
   const liveEdges = (edgesRaw || []).filter(
     (e) => e && e.id && !e.stale && e.isLatest !== false
   );
+  const nodeById = new Map(liveNodes.map((n) => [n.id, n]));
 
   const neighborsById = new Map();
   const degreeMap = new Map();
@@ -776,7 +1016,7 @@ export async function findSemanticDuplicateCandidates(deps, options = {}) {
   const MAX_PREFIX_BUCKET = 80;
   const MAX_EXACT_BUCKET = 250;
   const seenPairs = new Set();
-  const candidates = [];
+  const rawEntries = [];
 
   for (const [bKey, idxs] of buckets.entries()) {
     if (idxs.length < 2) continue;
@@ -808,6 +1048,9 @@ export async function findSemanticDuplicateCandidates(deps, options = {}) {
         const sim = scorePreparedPair(prepA, prepB, neighborsById);
         if (sim.score < minScore) continue;
 
+        const { autoSafe, autoReason } = classifyAutoSafeMerge(nodeA, nodeB, prepA, prepB, sim);
+        if (autoSafeOnly && !autoSafe) continue;
+
         const { suggestedWinner, suggestedAliases } = chooseWinnerAndAliases(
           nodeA,
           nodeB,
@@ -818,38 +1061,74 @@ export async function findSemanticDuplicateCandidates(deps, options = {}) {
             ? [...sim.reasons, "same_type"]
             : [...sim.reasons, "cross_type"];
 
-        candidates.push({
-          nodeA: summarizeCandidateNode(nodeA, degreeMap),
-          nodeB: summarizeCandidateNode(nodeB, degreeMap),
+        const formatted = compact
+          ? {
+              nodeA: summarizeCandidateNode(nodeA, degreeMap, true),
+              nodeB: summarizeCandidateNode(nodeB, degreeMap, true),
+              score: sim.score,
+              autoSafe,
+              ...(autoReason ? { autoReason } : {}),
+              reasons,
+              sharedNeighborsCount: sim.sharedNeighbors.length,
+              sharedObsCount: sim.sharedObs.length,
+              suggestedWinner,
+              suggestedAliases
+            }
+          : {
+              nodeA: summarizeCandidateNode(nodeA, degreeMap, false),
+              nodeB: summarizeCandidateNode(nodeB, degreeMap, false),
+              score: sim.score,
+              autoSafe,
+              ...(autoReason ? { autoReason } : {}),
+              reasons,
+              sharedNeighbors: sim.sharedNeighbors,
+              sharedObs: sim.sharedObs,
+              suggestedWinner,
+              suggestedAliases
+            };
+
+        rawEntries.push({
+          rawNodeA: nodeA,
+          rawNodeB: nodeB,
           score: sim.score,
+          autoSafe,
+          autoReason,
           reasons,
-          sharedNeighbors: sim.sharedNeighbors,
-          sharedObs: sim.sharedObs,
-          suggestedWinner,
-          suggestedAliases
+          degSum: (degreeMap.get(nodeA.id) || 0) + (degreeMap.get(nodeB.id) || 0),
+          formatted
         });
       }
     }
   }
 
-  candidates.sort(
+  rawEntries.sort(
     (a, b) =>
       b.score - a.score ||
-      b.nodeA.degree + b.nodeB.degree - (a.nodeA.degree + a.nodeB.degree) ||
-      String(a.nodeA.id).localeCompare(String(b.nodeA.id)) ||
-      String(a.nodeB.id).localeCompare(String(b.nodeB.id))
+      b.degSum - a.degSum ||
+      String(a.rawNodeA.id).localeCompare(String(b.rawNodeA.id)) ||
+      String(a.rawNodeB.id).localeCompare(String(b.rawNodeB.id))
   );
 
-  const selected = candidates.slice(0, limit);
+  const selectedEntries = rawEntries.slice(0, limit);
+  const { clusters, autoSafePlan } = buildDuplicateClusters(selectedEntries, nodeById, degreeMap);
+  const reviewClusterCount = clusters.filter((c) => !c.allAutoSafe).length;
+
   return {
     status: "candidates_ready",
-    version: "4.0",
+    version: PLANNER_VERSION,
+    compact,
+    autoSafeOnly,
     totalNodesScanned: liveNodes.length,
     totalEdgesScanned: liveEdges.length,
     minScore,
     limit,
-    candidateCount: selected.length,
-    candidates: selected
+    candidateCount: selectedEntries.length,
+    clusterCount: clusters.length,
+    autoSafeCount: autoSafePlan.length,
+    reviewClusterCount,
+    autoSafePlan,
+    clusters,
+    candidates: clustersOnly ? [] : selectedEntries.map((e) => e.formatted)
   };
 }
 
@@ -952,24 +1231,7 @@ function resolveNodeRef(ref, nodeById, allNodes, mergedIntoMap = null, preferred
 }
 
 async function triggerSnapshotRebuild(deps) {
-  const engine = deps?.engine;
-  if (typeof engine?.worker?.trigger === "function") {
-    try {
-      await engine.worker.trigger({
-        namespace: deps?.namespace || DEFAULT_III_NAMESPACE,
-        function_id: "mem::graph-snapshot-rebuild",
-        payload: { force: true }
-      });
-      return true;
-    } catch {}
-  }
-  if (typeof deps?.rebuildSnapshot === "function" && deps?.secret) {
-    try {
-      await deps.rebuildSnapshot(deps.secret);
-      return true;
-    } catch {}
-  }
-  return false;
+  return compactorRebuildSnapshot(deps);
 }
 
 function buildMergedKeepMetadata(keepNode, mergeNode, canonicalNameOverride) {
@@ -1059,7 +1321,7 @@ export async function applySemanticMergePlan(deps, planItems, options = {}) {
   if (normalizedItems.length === 0) {
     return {
       status: globalDryRun ? "dry_run" : "nothing_to_merge",
-      version: "4.0",
+      version: PLANNER_VERSION,
       dryRun: globalDryRun,
       requestedCount: 0,
       mergedCount: 0,
@@ -1349,12 +1611,14 @@ export async function applySemanticMergePlan(deps, planItems, options = {}) {
     }
 
     graveyardEntriesWritten = appendToGraveyard(graveyardBatch, graveyardPath);
-    await triggerSnapshotRebuild(deps);
+    if (!options.skipSnapshot) {
+      await triggerSnapshotRebuild(deps);
+    }
   }
 
   return {
     status: globalDryRun ? "dry_run" : "semantic_merged",
-    version: "4.0",
+    version: PLANNER_VERSION,
     dryRun: globalDryRun,
     requestedCount: normalizedItems.length,
     mergedCount,
@@ -1490,18 +1754,157 @@ async function fetchViewGraph(deps) {
   return null;
 }
 
+function buildCompactableHubLeafGroups({
+  storeNodes,
+  storeEdges,
+  viewNodes,
+  storeNodeById,
+  globalDeg,
+  globalIncidentById,
+  maxHubGroups = 8,
+  maxLeavesPerHub = 6
+}) {
+  const pageIdSet = new Set(viewNodes.map((n) => n.id));
+  const groups = [];
+  const crossDomainInPageLeaves = new Map();
+  const seenCrossLeafIds = new Set();
+
+  const isCleanEntity = (n) => {
+    if (!n || !n.id || !n.name || n.stale || isTransientScratchNode(n)) return false;
+    const clean = normalizeSemanticText(n.name);
+    if (!clean || HALLUCINATION_REGEX.test(clean)) return false;
+    if (CJK_REGEX.test(clean) && !CJK_CANONICAL_MAP.has(clean)) return false;
+    return true;
+  };
+
+  for (const hub of storeNodes) {
+    const hDeg = globalDeg.get(hub.id) || 0;
+    if (hDeg < 3 || !isCleanEntity(hub)) continue;
+    const inc = globalIncidentById.get(hub.id) || [];
+    const hubInPage = pageIdSet.has(hub.id);
+
+    const leaves = [];
+    const seenLeaf = new Set();
+    for (const e of inc) {
+      if (!isLowWeightHeuristicEdge(e)) continue;
+      const leafId = e.sourceNodeId === hub.id ? e.targetNodeId : e.sourceNodeId;
+      if (leafId === hub.id || seenLeaf.has(leafId)) continue;
+      if ((globalDeg.get(leafId) || 0) !== 2) continue;
+
+      const leaf = storeNodeById.get(leafId);
+      if (!isCleanEntity(leaf)) continue;
+      seenLeaf.add(leafId);
+
+      const leafInc = globalIncidentById.get(leafId) || [];
+      const otherEdge = leafInc.find((le) => le.id !== e.id);
+      const otherId = otherEdge
+        ? otherEdge.sourceNodeId === leafId
+          ? otherEdge.targetNodeId
+          : otherEdge.sourceNodeId
+        : null;
+      const otherNode = otherId ? storeNodeById.get(otherId) : null;
+      const leafInPage = pageIdSet.has(leafId);
+      const domain = classifyDomain(leaf);
+
+      const descriptor = {
+        id: leaf.id,
+        type: leaf.type,
+        name: leaf.name,
+        domainId: domain.id,
+        inPage: leafInPage,
+        globalDegree: 2,
+        otherNeighbor: otherNode?.name || otherId || null,
+        otherNeighborEdgeType: otherEdge?.type || null,
+        sourceObservationIds: leaf.sourceObservationIds || []
+      };
+      leaves.push(descriptor);
+
+      if (hubInPage && leafInPage && !seenCrossLeafIds.has(leafId)) {
+        seenCrossLeafIds.add(leafId);
+        if (!crossDomainInPageLeaves.has(domain.id)) {
+          crossDomainInPageLeaves.set(domain.id, []);
+        }
+        crossDomainInPageLeaves.get(domain.id).push({
+          ...descriptor,
+          viaHubId: hub.id,
+          viaHubName: hub.name,
+          viaHubDeg: hDeg
+        });
+      }
+    }
+
+    if (leaves.length >= 2) {
+      leaves.sort(
+        (a, b) => Number(b.inPage) - Number(a.inPage) || String(a.id).localeCompare(String(b.id))
+      );
+      const inPageLeafCount = leaves.filter((l) => l.inPage).length;
+      const maxDroppableFromHub = Math.max(0, hDeg - 2);
+      const pairHubDrop = Math.min(2, maxDroppableFromHub);
+      const expectedNetReadDeltaPerPair = hubInPage
+        ? -(pairHubDrop * 2)
+        : pairHubDrop > 0
+        ? -2
+        : 0;
+      groups.push({
+        groupType: "shared_hub",
+        hub: {
+          id: hub.id,
+          type: hub.type,
+          name: hub.name,
+          globalDeg: hDeg,
+          inPage: hubInPage
+        },
+        inPageLeafCount,
+        eligibleLeafCount: leaves.length,
+        expectedNetReadDeltaPerPair,
+        leaves: leaves.slice(0, maxLeavesPerHub)
+      });
+    }
+  }
+
+  for (const [domainId, pool] of crossDomainInPageLeaves.entries()) {
+    if (pool.length < 2) continue;
+    groups.push({
+      groupType: "cross_hub_domain",
+      domainId,
+      inPageLeafCount: pool.length,
+      eligibleLeafCount: pool.length,
+      expectedNetReadDeltaPerPair: -4,
+      leaves: pool.slice(0, maxLeavesPerHub)
+    });
+  }
+
+  groups.sort((a, b) => {
+    const aInPage = a.groupType === "shared_hub" ? Number(a.hub.inPage) : 1;
+    const bInPage = b.groupType === "shared_hub" ? Number(b.hub.inPage) : 1;
+    return (
+      bInPage - aInPage ||
+      a.expectedNetReadDeltaPerPair - b.expectedNetReadDeltaPerPair ||
+      b.inPageLeafCount - a.inPageLeafCount ||
+      b.eligibleLeafCount - a.eligibleLeafCount ||
+      Number(a.groupType === "cross_hub_domain") - Number(b.groupType === "cross_hub_domain")
+    );
+  });
+
+  return groups.slice(0, maxHubGroups);
+}
+
 /**
- * Gathers view unlinked or low-degree (<= 1) related_to-only nodes with short context excerpts
- * from mem:obs:* (matched via sourceObservationIds) and top candidate domain hubs for Gemini 4 Hydrogen.
+ * Gathers view unlinked / globally isolated / low-degree nodes and compactable deg=2 hot-hub leaf pairs
+ * with deduplicated hubCatalog and concise mem:obs:* excerpts for Gemini 4 Hydrogen.
  */
 export async function buildSemanticLinkBatch(deps, options = {}) {
   const engine = deps?.engine;
   if (!engine) throw new Error("buildSemanticLinkBatch requires deps.engine");
 
+  const compact = options.compact !== false;
+  const pairMode = Boolean(options.pairMode);
+  const includePairs = options.includePairs !== false;
   const limit = Math.max(1, Number(options.limit ?? 40));
-  const maxObsPerNode = Math.max(1, Number(options.maxObsPerNode ?? 3));
-  const maxExcerptChars = Math.max(80, Number(options.maxExcerptChars ?? 240));
+  const maxObsPerNode = Math.max(1, Number(options.maxObsPerNode ?? (compact ? 1 : 3)));
+  const maxExcerptChars = Math.max(80, Number(options.maxExcerptChars ?? (compact ? 160 : 240)));
   const hubLimit = Math.max(6, Number(options.hubLimit ?? 18));
+  const maxHubGroups = Math.max(2, Number(options.maxHubGroups ?? 8));
 
   const [viewRes, allNodesRaw, allEdgesRaw] = await Promise.all([
     fetchViewGraph(deps).catch(() => null),
@@ -1531,12 +1934,20 @@ export async function buildSemanticLinkBatch(deps, options = {}) {
   }
 
   const globalDeg = new Map();
+  const globalIncidentById = new Map();
   for (const e of storeEdges) {
     globalDeg.set(e.sourceNodeId, (globalDeg.get(e.sourceNodeId) || 0) + 1);
     globalDeg.set(e.targetNodeId, (globalDeg.get(e.targetNodeId) || 0) + 1);
+    if (!globalIncidentById.has(e.sourceNodeId)) globalIncidentById.set(e.sourceNodeId, []);
+    if (!globalIncidentById.has(e.targetNodeId)) globalIncidentById.set(e.targetNodeId, []);
+    globalIncidentById.get(e.sourceNodeId).push(e);
+    globalIncidentById.get(e.targetNodeId).push(e);
   }
 
-  const unlinkedCandidates = [];
+  const budgetCost = estimateSubgraphReadCost(viewNodes, storeEdges);
+
+  const trulyIsolatedCandidates = [];
+  const viewOnlyUnlinkedCandidates = [];
   const relatedOnlyCandidates = [];
 
   for (const vn of viewNodes) {
@@ -1548,17 +1959,43 @@ export async function buildSemanticLinkBatch(deps, options = {}) {
 
     const inc = viewIncidentById.get(full.id) || [];
     const deg = inc.length;
+    const gDeg = globalDeg.get(full.id) || 0;
 
     if (deg === 0) {
-      unlinkedCandidates.push({ node: full, viewDegree: 0, incidentEdges: inc });
+      const entry = { node: full, viewDegree: 0, globalDegree: gDeg, incidentEdges: inc };
+      if (gDeg === 0) {
+        trulyIsolatedCandidates.push(entry);
+      } else {
+        viewOnlyUnlinkedCandidates.push(entry);
+      }
     } else if (deg <= 1 && inc.every((e) => e.type === "related_to")) {
-      relatedOnlyCandidates.push({ node: full, viewDegree: deg, incidentEdges: inc });
+      relatedOnlyCandidates.push({ node: full, viewDegree: deg, globalDegree: gDeg, incidentEdges: inc });
     }
   }
 
-  const selected = [...unlinkedCandidates, ...relatedOnlyCandidates].slice(0, limit);
+  relatedOnlyCandidates.sort((a, b) => a.globalDegree - b.globalDegree);
+  const unlinkedCount = trulyIsolatedCandidates.length + viewOnlyUnlinkedCandidates.length;
 
-  // Gather needed observation IDs across selected nodes
+  const selected = pairMode
+    ? trulyIsolatedCandidates.slice(0, limit)
+    : [...trulyIsolatedCandidates, ...viewOnlyUnlinkedCandidates, ...relatedOnlyCandidates].slice(
+        0,
+        limit
+      );
+
+  const hubLeafGroups = includePairs
+    ? buildCompactableHubLeafGroups({
+        storeNodes,
+        storeEdges,
+        viewNodes,
+        storeNodeById,
+        globalDeg,
+        globalIncidentById,
+        maxHubGroups
+      })
+    : [];
+
+  // Gather needed observation IDs across selected items AND hubLeafGroups in one lookup
   const neededObsIds = [];
   for (const entry of selected) {
     const obsIds = Array.isArray(entry.node.sourceObservationIds)
@@ -1566,7 +2003,33 @@ export async function buildSemanticLinkBatch(deps, options = {}) {
       : [];
     for (const oid of obsIds) neededObsIds.push(oid);
   }
+  for (const grp of hubLeafGroups) {
+    for (const leaf of grp.leaves) {
+      const lastObs = Array.isArray(leaf.sourceObservationIds)
+        ? leaf.sourceObservationIds.slice(-1)
+        : [];
+      for (const oid of lastObs) neededObsIds.push(oid);
+    }
+  }
   const obsById = await lookupObservationsByIds(engine, neededObsIds);
+
+  // Attach concise observation excerpt to hubLeafGroups leaves and strip raw sourceObservationIds
+  const finalHubLeafGroups = hubLeafGroups.map((grp) => ({
+    ...grp,
+    leaves: grp.leaves.map(({ sourceObservationIds, ...leafRest }) => {
+      const lastOid = Array.isArray(sourceObservationIds) ? sourceObservationIds.at(-1) : null;
+      const obs = lastOid ? obsById.get(lastOid) : null;
+      const rawText = obs ? [obs.narrative, ...(obs.facts || [])].filter(Boolean).join(" | ") : "";
+      return {
+        ...leafRest,
+        ...(obs
+          ? {
+              excerpt: truncateSafe(rawText || obs.title, 120)
+            }
+          : {})
+      };
+    })
+  }));
 
   // Identify top candidate domain hubs from view + store
   const hubPool = (viewNodes.length ? viewNodes : storeNodes)
@@ -1585,7 +2048,7 @@ export async function buildSemanticLinkBatch(deps, options = {}) {
         type: n.type,
         name: n.name,
         domainId: domain.id,
-        domainLabel: domain.label,
+        ...(compact ? {} : { domainLabel: domain.label }),
         degree: deg
       };
     });
@@ -1603,8 +2066,21 @@ export async function buildSemanticLinkBatch(deps, options = {}) {
     hubsByDomain.get(hub.domainId)?.push(hub);
   }
   const topDomainHubs = hubPool.slice(0, hubLimit);
+  const hubCatalog = {};
+  const registerHub = (h) => {
+    if (!hubCatalog[h.id]) {
+      hubCatalog[h.id] = {
+        id: h.id,
+        type: h.type,
+        name: h.name,
+        domainId: h.domainId,
+        degree: h.degree
+      };
+    }
+  };
+  for (const h of topDomainHubs) registerHub(h);
 
-  const items = selected.map(({ node, viewDegree, incidentEdges }) => {
+  const items = selected.map(({ node, viewDegree, globalDegree: gDeg, incidentEdges }) => {
     const domain = classifyDomain(node);
     const obsIds = Array.isArray(node.sourceObservationIds)
       ? node.sourceObservationIds.slice(-maxObsPerNode)
@@ -1618,15 +2094,31 @@ export async function buildSemanticLinkBatch(deps, options = {}) {
       const ts = obs.timestamp || obs.createdAt || null;
       if (ts) timestamps.push(ts);
       const rawText = [obs.narrative, ...(obs.facts || [])].filter(Boolean).join(" | ");
-      observationExcerpts.push({
-        id: obs.id,
-        type: obs.type || "observation",
-        timestamp: ts,
-        title: truncateSafe(obs.title, 100),
-        excerpt: truncateSafe(rawText, maxExcerptChars),
-        concepts: Array.isArray(obs.concepts) ? obs.concepts.slice(0, 8) : [],
-        files: Array.isArray(obs.files) ? obs.files.slice(0, 8) : []
-      });
+      if (compact) {
+        const entry = {
+          id: obs.id,
+          timestamp: ts,
+          title: truncateSafe(obs.title, 80),
+          excerpt: truncateSafe(rawText, maxExcerptChars)
+        };
+        if (Array.isArray(obs.concepts) && obs.concepts.length > 0) {
+          entry.concepts = obs.concepts.slice(0, 4);
+        }
+        if (Array.isArray(obs.files) && obs.files.length > 0) {
+          entry.files = obs.files.slice(0, 4);
+        }
+        observationExcerpts.push(entry);
+      } else {
+        observationExcerpts.push({
+          id: obs.id,
+          type: obs.type || "observation",
+          timestamp: ts,
+          title: truncateSafe(obs.title, 100),
+          excerpt: truncateSafe(rawText, maxExcerptChars),
+          concepts: Array.isArray(obs.concepts) ? obs.concepts.slice(0, 8) : [],
+          files: Array.isArray(obs.files) ? obs.files.slice(0, 8) : []
+        });
+      }
     }
 
     timestamps.sort();
@@ -1636,33 +2128,69 @@ export async function buildSemanticLinkBatch(deps, options = {}) {
     const fallbackHubs = topDomainHubs
       .filter((h) => h.id !== node.id && !sameDomainHubs.some((s) => s.id === h.id))
       .slice(0, Math.max(0, 5 - sameDomainHubs.length));
+    const itemHubs = [...sameDomainHubs, ...fallbackHubs];
+    for (const h of itemHubs) registerHub(h);
 
     const existingEdges = incidentEdges.map((e) => {
       const otherId = e.sourceNodeId === node.id ? e.targetNodeId : e.sourceNodeId;
       const other = storeNodeById.get(otherId);
-      return {
-        edgeId: e.id,
-        type: e.type,
-        direction: e.sourceNodeId === node.id ? "outgoing" : "incoming",
-        otherNodeId: otherId,
-        otherNodeName: other?.name || otherId,
-        weight: e.weight,
-        tvalid: e.tvalid || null
-      };
+      return compact
+        ? {
+            edgeId: e.id,
+            type: e.type,
+            otherNodeId: otherId,
+            otherNodeName: other?.name || otherId,
+            weight: e.weight
+          }
+        : {
+            edgeId: e.id,
+            type: e.type,
+            direction: e.sourceNodeId === node.id ? "outgoing" : "incoming",
+            otherNodeId: otherId,
+            otherNodeName: other?.name || otherId,
+            weight: e.weight,
+            tvalid: e.tvalid || null
+          };
     });
 
-    return {
+    const isViewOnlyUnlinked = viewDegree === 0 && gDeg > 0;
+    const globalNeighborNames = isViewOnlyUnlinked
+      ? (globalIncidentById.get(node.id) || []).slice(0, 3).map((e) => {
+          const otherId = e.sourceNodeId === node.id ? e.targetNodeId : e.sourceNodeId;
+          return storeNodeById.get(otherId)?.name || otherId;
+        })
+      : [];
+
+    const baseItem = {
       id: node.id,
       type: node.type,
       name: node.name,
       domainId: domain.id,
-      domainLabel: domain.label,
       viewDegree,
-      globalDegree: globalDeg.get(node.id) || viewDegree,
-      existingEdges,
+      globalDegree: gDeg,
+      ...(gDeg === 0 ? { trulyIsolated: true } : {}),
+      ...(isViewOnlyUnlinked
+        ? {
+            alreadyConnectedGlobally: true,
+            globalNeighborSample: globalNeighborNames
+          }
+        : {}),
+      ...(existingEdges.length > 0 || !compact ? { existingEdges } : {}),
+      observationExcerpts
+    };
+
+    if (compact) {
+      return {
+        ...baseItem,
+        candidateHubIds: itemHubs.map((h) => h.id)
+      };
+    }
+
+    return {
+      ...baseItem,
+      domainLabel: domain.label,
       sourceObservationIds: obsIds,
-      observationExcerpts,
-      candidateHubs: [...sameDomainHubs, ...fallbackHubs],
+      candidateHubs: itemHubs,
       temporalHints: {
         oldestObsTimestamp: timestamps[0] || node.createdAt || null,
         latestObsTimestamp: timestamps[timestamps.length - 1] || node.updatedAt || null,
@@ -1673,13 +2201,24 @@ export async function buildSemanticLinkBatch(deps, options = {}) {
 
   return {
     status: "link_batch_ready",
-    version: "4.0",
+    version: PLANNER_VERSION,
+    compact,
+    pairMode,
     limit,
     viewNodesCount: viewNodes.length,
-    unlinkedCount: unlinkedCandidates.length,
+    unlinkedCount,
+    trulyIsolatedCount: trulyIsolatedCandidates.length,
+    viewOnlyUnlinkedCount: viewOnlyUnlinkedCandidates.length,
     lowDegreeRelatedOnlyCount: relatedOnlyCandidates.length,
     batchCount: items.length,
+    hubLeafGroupCount: finalHubLeafGroups.length,
     observationsMatchedCount: obsById.size,
+    budget: {
+      estimatedReads: budgetCost.estimatedReads,
+      maxReads: budgetCost.maxReads,
+      wouldTruncate: budgetCost.wouldTruncate,
+      headroomReads: budgetCost.headroomReads
+    },
     allowedRelations: [
       "implements",
       "configures",
@@ -1693,7 +2232,8 @@ export async function buildSemanticLinkBatch(deps, options = {}) {
       "modifies",
       "causes"
     ],
-    domainHubs: topDomainHubs,
+    ...(compact ? { hubCatalog } : { domainHubs: topDomainHubs }),
+    hubLeafGroups: finalHubLeafGroups,
     items
   };
 }
@@ -2011,7 +2551,7 @@ export async function applyTemporalLinks(deps, triples, options = {}) {
     });
     return {
       status: globalDryRun ? "dry_run" : rejected.length ? "validation_failed" : "nothing_to_apply",
-      version: "4.0",
+      version: PLANNER_VERSION,
       dryRun: globalDryRun,
       requestedCount: rawList.length,
       validCount: validTriples.length,
@@ -2041,7 +2581,7 @@ export async function applyTemporalLinks(deps, triples, options = {}) {
   if (!engine) {
     return {
       status: "temporal_links_applied",
-      version: "4.0",
+      version: PLANNER_VERSION,
       dryRun: false,
       requestedCount: rawList.length,
       validCount: validTriples.length,
@@ -2303,11 +2843,13 @@ export async function applyTemporalLinks(deps, triples, options = {}) {
     }
   }
 
-  await triggerSnapshotRebuild(deps);
+  if (!options.skipSnapshot) {
+    await triggerSnapshotRebuild(deps);
+  }
 
   return {
     status: "temporal_links_applied",
-    version: "4.0",
+    version: PLANNER_VERSION,
     dryRun: false,
     requestedCount: rawList.length,
     validCount: validTriples.length,
@@ -2319,5 +2861,191 @@ export async function applyTemporalLinks(deps, triples, options = {}) {
     applied,
     totalStoreNodes: control?.nodes ?? null,
     totalStoreEdges: control?.edges ?? null
+  };
+}
+
+/**
+ * Single-session combined pipeline (--apply-and-compact / --cycle):
+ * executes optional auto-safe merges + explicit mergePlan + temporal links + edge compaction
+ * inside one KV/worker lifecycle, triggers at most one snapshot rebuild, and reports budget diff.
+ */
+export async function runApplyAndCompactCycle(deps, options = {}) {
+  const engine = deps?.engine;
+  if (!engine) throw new Error("runApplyAndCompactCycle requires deps.engine");
+
+  const dryRun = Boolean(options.dryRun);
+  const targetMaxReads = Number.isFinite(Number(options.targetMaxReads))
+    ? Math.max(0, Number(options.targetMaxReads))
+    : 3800;
+  const limit = Number.isFinite(Number(options.limit))
+    ? Math.max(0, Math.floor(Number(options.limit)))
+    : 500;
+  const queryLimit = Number.isFinite(Number(options.queryLimit))
+    ? Math.max(1, Math.min(500, Math.floor(Number(options.queryLimit))))
+    : 500;
+  const autoSafeMerges = Boolean(options.autoSafeMerges);
+  const minAutoScore = Number.isFinite(Number(options.minAutoScore))
+    ? Number(options.minAutoScore)
+    : 0.65;
+  const compact = options.compact !== false;
+  const strict = Boolean(options.strict);
+
+  const budgetBefore = await runBudgetSimulation(deps, {
+    targetMaxReads,
+    limit,
+    queryLimit,
+    fetch: options.fetch
+  });
+
+  const rawExplicitMerges = Array.isArray(options.mergePlan)
+    ? options.mergePlan
+    : Array.isArray(options.mergePlan?.plan)
+    ? options.mergePlan.plan
+    : Array.isArray(options.mergePlan?.merges)
+    ? options.mergePlan.merges
+    : [];
+  const explicitMerges = [];
+  for (const item of rawExplicitMerges) {
+    if (!item || typeof item !== "object") continue;
+    const targets = Array.isArray(item.merge) ? item.merge : [item.merge];
+    for (const m of targets) {
+      explicitMerges.push({
+        keep: item.keep,
+        merge: m,
+        ...(item.canonicalName ? { canonicalName: item.canonicalName } : {})
+      });
+    }
+  }
+  let autoSafePlan = [];
+  if (autoSafeMerges) {
+    const autoScan = await findSemanticDuplicateCandidates(deps, {
+      limit: 250,
+      minScore: minAutoScore,
+      includeCrossType: false,
+      autoSafeOnly: true,
+      compact: true
+    });
+    autoSafePlan = autoScan.autoSafePlan || [];
+  }
+
+  const mergedSeen = new Set();
+  const combinedMerges = [];
+  for (const item of [...explicitMerges, ...autoSafePlan]) {
+    if (!item || typeof item !== "object") continue;
+    const mKey = String(typeof item.merge === "object" ? item.merge?.id || item.merge?.name : item.merge);
+    if (!mKey || mergedSeen.has(mKey)) continue;
+    mergedSeen.add(mKey);
+    combinedMerges.push({
+      keep: item.keep,
+      merge: item.merge,
+      ...(item.canonicalName ? { canonicalName: item.canonicalName } : {})
+    });
+  }
+
+  let mergeResult = null;
+  if (combinedMerges.length > 0) {
+    mergeResult = await applySemanticMergePlan(deps, combinedMerges, {
+      dryRun,
+      skipSnapshot: true,
+      graveyardPath: options.graveyardPath
+    });
+  }
+
+  const links = Array.isArray(options.links)
+    ? options.links
+    : Array.isArray(options.links?.triples)
+    ? options.links.triples
+    : Array.isArray(options.links?.links)
+    ? options.links.links
+    : [];
+  let linkResult = null;
+  if (links.length > 0) {
+    linkResult = await applyTemporalLinks(deps, links, {
+      dryRun,
+      skipSnapshot: true
+    });
+  }
+
+  const compactResult = await compactRedundantEdges(deps, {
+    dryRun,
+    targetMaxReads,
+    limit,
+    queryLimit,
+    graveyardPath: options.graveyardPath,
+    skipSnapshot: true,
+    skipLiveRecheck: true,
+    compact,
+    fetch: options.fetch
+  });
+
+  const mutated =
+    !dryRun &&
+    ((mergeResult?.mergedCount || 0) > 0 ||
+      (linkResult?.appliedEdgesCount || 0) > 0 ||
+      (compactResult?.compactedCount || 0) > 0);
+
+  let snapshotRebuilt = false;
+  if (mutated) {
+    snapshotRebuilt = await triggerSnapshotRebuild(deps).catch(() => false);
+  }
+
+  const budgetAfter = dryRun
+    ? {
+        estimatedReads: compactResult.estimatedReadsAfter ?? budgetBefore.estimatedReads,
+        maxReads: budgetBefore.maxReads,
+        headroomReads:
+          budgetBefore.maxReads - (compactResult.estimatedReadsAfter ?? budgetBefore.estimatedReads),
+        wouldTruncate: Boolean(compactResult.wouldTruncateAfter)
+      }
+    : await runBudgetSimulation(deps, {
+        targetMaxReads,
+        limit,
+        queryLimit,
+        fetch: options.fetch
+      });
+
+  let verification = null;
+  if (typeof options.runVerifyFn === "function") {
+    verification = await options.runVerifyFn(deps, { strict });
+  }
+
+  return {
+    version: PLANNER_VERSION,
+    status: dryRun ? "dry_run" : "cycle_completed",
+    dryRun,
+    snapshotRebuilt,
+    budget: {
+      beforeReads: budgetBefore.estimatedReads,
+      afterReads: budgetAfter.estimatedReads,
+      readsDelta: budgetAfter.estimatedReads - budgetBefore.estimatedReads,
+      maxReads: budgetAfter.maxReads,
+      headroomBefore: budgetBefore.headroomReads,
+      headroomAfter: budgetAfter.headroomReads,
+      wouldTruncateBefore: budgetBefore.wouldTruncate,
+      wouldTruncateAfter: budgetAfter.wouldTruncate
+    },
+    merges: {
+      requestedCount: combinedMerges.length,
+      autoSafeCandidateCount: autoSafePlan.length,
+      mergedCount: mergeResult?.mergedCount || 0,
+      skippedCount: mergeResult?.skippedCount || 0,
+      repointedEdgesCount: mergeResult?.repointedEdgesCount || 0,
+      deletedRedundantEdgesCount: mergeResult?.deletedRedundantEdgesCount || 0
+    },
+    links: {
+      requestedCount: links.length,
+      validCount: linkResult?.validCount || 0,
+      rejectedCount: linkResult?.rejectedCount || 0,
+      appliedEdgesCount: linkResult?.appliedEdgesCount || 0,
+      supersededEdgesCount: linkResult?.supersededEdgesCount || 0,
+      ...(linkResult?.rejected?.length ? { rejected: linkResult.rejected } : {})
+    },
+    compaction: {
+      status: compactResult.status,
+      selectedCount: compactResult.selectedCount || 0,
+      compactedCount: compactResult.compactedCount || 0,
+      estimatedReadsSaved: compactResult.estimatedReadsSaved || 0
+    },
+    ...(verification ? { verification } : {})
   };
 }

@@ -64,7 +64,7 @@ export function isLowWeightHeuristicEdge(edge) {
   return Number.isFinite(weight) && weight <= MAX_HEURISTIC_WEIGHT;
 }
 
-function buildDegreeAndStrengthStats(allEdges = []) {
+export function buildDegreeAndStrengthStats(allEdges = []) {
   const liveEdges = [];
   const activeEdges = [];
   const degMap = new Map();
@@ -210,7 +210,7 @@ function selectLifoPageNodes(allNodes, queryLimit) {
     .slice(0, queryLimit);
 }
 
-async function resolveGraphInputs(deps = {}, options = {}) {
+export async function resolveGraphInputs(deps = {}, options = {}) {
   const queryLimit = Math.max(
     1,
     Math.min(
@@ -549,7 +549,7 @@ function appendEdgeCompactionGraveyard(graveyardPath, items, nodeById) {
   return items.length;
 }
 
-async function triggerSnapshotRebuild(deps, options = {}) {
+export async function triggerSnapshotRebuild(deps, options = {}) {
   if (typeof deps?.rebuildSnapshot === "function") {
     await deps.rebuildSnapshot(deps.secret);
     return true;
@@ -860,14 +860,16 @@ export async function compactRedundantEdges(
   await engine.kvSet("mem:graph:retrieval-control", "current", control);
   let snapshotRebuilt = false;
   let snapshotRebuildError = null;
-  try {
-    snapshotRebuilt = await triggerSnapshotRebuild(deps, options);
-  } catch (err) {
-    snapshotRebuildError = err?.message || String(err);
+  if (!options?.skipSnapshot) {
+    try {
+      snapshotRebuilt = await triggerSnapshotRebuild(deps, options);
+    } catch (err) {
+      snapshotRebuildError = err?.message || String(err);
+    }
   }
 
   let liveTruncatedAfter = inputs.liveTruncated;
-  if (inputs.liveQueryAvailable) {
+  if (inputs.liveQueryAvailable && !options?.skipLiveRecheck) {
     try {
       const postInputs = await resolveGraphInputs(
         {
@@ -884,6 +886,16 @@ export async function compactRedundantEdges(
       // Keep prior value if post-query fails
     }
   }
+
+  const compactOutput = Boolean(options?.compact);
+  const formattedEdges = compactOutput
+    ? plannedDescriptors.map((d) => ({
+        edgeId: d.edgeId,
+        sourceNodeId: d.sourceNodeId,
+        targetNodeId: d.targetNodeId,
+        readSavings: d.readSavings
+      }))
+    : plannedDescriptors;
 
   return {
     status: "compacted",
@@ -909,8 +921,8 @@ export async function compactRedundantEdges(
     totalStoreEdges: control?.edges ?? null,
     snapshotRebuilt,
     ...(snapshotRebuildError ? { snapshotRebuildError } : {}),
-    compactedEdges: plannedDescriptors,
-    hotHubsBefore: plan.beforeCost.hotHubs,
+    compactedEdges: formattedEdges,
+    ...(compactOutput ? {} : { hotHubsBefore: plan.beforeCost.hotHubs }),
     hotHubsAfter: plan.afterCost.hotHubs
   };
 }

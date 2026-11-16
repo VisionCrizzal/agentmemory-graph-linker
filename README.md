@@ -1,4 +1,4 @@
-# AgentMemory Knowledge Graph Linker, Semantic Planner, Edge Compactor & Smart AI Router (v4.0)
+# AgentMemory Knowledge Graph Linker, Semantic Planner, Edge Compactor & Smart AI Router (v4.1)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Companion for AgentMemory](https://img.shields.io/badge/Companion%20For-rohitg00%2Fagentmemory-blue.svg)](https://github.com/rohitg00/agentmemory)
@@ -10,7 +10,7 @@
 > This toolkit is a companion skill built specifically for **[AgentMemory (`rohitg00/agentmemory`)](https://github.com/rohitg00/agentmemory)**.
 > It interacts directly with the `@agentmemory/agentmemory` daemon, `iii-sdk` WebSocket (`ws://127.0.0.1:49134`), and Knowledge Graph (`http://localhost:3113/#graph`). You must have [AgentMemory](https://github.com/rohitg00/agentmemory) installed and running to use it.
 
-A **Hybrid Neuro-Symbolic Antigravity Skill (`agentmemory-graph-linker`)** and **Task-Aware Smart AI Router (v4.0)** engineered for **Gemini 4 Hydrogen**. Pairs zero-token structural audits, read-budget simulation (`maxReads: 4096`), safe edge compaction (`edge-compactor.mjs`), 5-layer semantic alias merging and bi-temporal linking (`semantic-planner.mjs`), Cold Graveyard archival/restore (`~/.agentmemory/graveyard.jsonl`), and `iii-engine` RAM/log healing with a mandatory `--verify-json [--strict]` verification gate — while preserving `--beautify` and `--auto` zero-token fallback compatibility.
+A **Hybrid Neuro-Symbolic Antigravity Skill (`agentmemory-graph-linker` v4.1)** and **Task-Aware Smart AI Router** engineered for **Gemini 4 Hydrogen**. Pairs zero-token structural audits, read-budget simulation (`maxReads: 4096`), compact clustered synonym/link extraction (`hubCatalog`, `--auto-safe`, `--pair-mode`), safe edge compaction (`edge-compactor.mjs`), 5-layer semantic alias merging & bi-temporal linking (`semantic-planner.mjs`), single-command `--apply-and-compact` execution, Cold Graveyard archival/restore (`~/.agentmemory/graveyard.jsonl`), and `iii-engine` RAM/log healing with `--verify-json [--strict]` — while preserving `--beautify` and `--auto` zero-token fallback compatibility.
 
 ---
 
@@ -84,19 +84,20 @@ SCRIPT=~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs
 node "$SCRIPT" --status
 node "$SCRIPT" --verify-json [--strict]
 
-# 2. Zero-token candidate extraction & read-budget simulation
+# 2. Zero-token candidate extraction & read-budget simulation (compact JSON by default)
 node "$SCRIPT" --audit [--days 14]
 node "$SCRIPT" --simulate-budget [--limit N] [--target-reads N] [--query-limit N]
-node "$SCRIPT" --suggest-merges [--limit N] [--min-score S] [--same-type-only]
-node "$SCRIPT" --suggest-links [--limit N]
+node "$SCRIPT" --suggest-merges [--limit N] [--min-score S] [--same-type-only] [--auto-safe] [--clusters-only] [--full] [--minify]
+node "$SCRIPT" --suggest-links [--limit N] [--pair-mode] [--full] [--minify]
 
-# 3. Safe symbolic execution (5-layer KV + Cold Graveyard)
+# 3. Safe symbolic execution & one-shot cycle (5-layer KV + Cold Graveyard)
 node "$SCRIPT" --lock "Manual refactoring"
-node "$SCRIPT" --dedup
-node "$SCRIPT" --merge-plan '<json_or_file>' [--dry-run]
+node "$SCRIPT" --dedup [--auto-safe]
+node "$SCRIPT" --merge-plan '<json_or_file>' [--auto-safe] [--dry-run]
 node "$SCRIPT" --prune [--days 14] [--include-stale] [--include-hallucinations] [--no-hallucinations]
 node "$SCRIPT" --apply-temporal '<json_or_file>' [--dry-run]
-node "$SCRIPT" --compact-edges [--apply] [--target-reads N] [--limit N] [--query-limit N]
+node "$SCRIPT" --compact-edges [--apply] [--target-reads N] [--limit N] [--query-limit N] [--full]
+node "$SCRIPT" --apply-and-compact ['<json_or_file>'] [--merges '<json_or_file>'] [--links '<json_or_file>'] [--auto-safe] [--target-reads N] [--limit N] [--dry-run] [--strict]
 node "$SCRIPT" --unlock
 
 # 4. In-place rename, lossless Cold Graveyard restore & explicit delete
@@ -124,6 +125,9 @@ node "$SCRIPT" --verify-json --strict
 
 ## 📋 Changelog
 
+- **v4.1 (2026-11-16)**:
+  - **Token-Efficient Consolidation (`--suggest-merges`, `--suggest-links`, `--auto-safe`)**: Compact output default (`--full` restores verbose fields) strips redundant `sourceObservationIds` arrays, deduplicates hubs into a root `hubCatalog`, groups connected synonyms into multi-node `clusters`, and splits zero-risk morphological/compact merges (`--auto-safe` with numeric version guards).
+  - **Budget-Aware Linking & One-Shot Cycle (`--pair-mode`, `--apply-and-compact`)**: Separates `trulyIsolatedCount` (`globalDegree === 0`) from `viewOnlyUnlinkedCount`, surfaces compactable `deg=2` hot-hub `hubLeafGroups` (`expectedNetReadDeltaPerPair: -4` / `-2`), runs merge + link + compact + verification with 1 deferred snapshot rebuild in `--apply-and-compact`, and suppresses `[OTel]`/`[iii]` CLI stdout chatter for pure JSON parsing.
 - **v4.0 (2026-11-13)**:
   - **Hybrid Neuro-Symbolic Upgrade (Gemini 4 Hydrogen)**: Added `edge-compactor.mjs` (`--simulate-budget`, `--compact-edges [--apply]`), `semantic-planner.mjs` (`--suggest-merges`, `--merge-plan`, `--suggest-links`, `--apply-temporal`), and `--verify-json [--strict]`.
   - **Task-Aware Smart AI Router v4.0**: Added `FAST_MODEL_ORDER` vs `ACCURACY_MODEL_ORDER` (`selectTargetsForFormat`), added `gemini-flash-latest`, cleaned `<observation>` `buildLocalExtractiveFallback` (removed hardcoded `.env` edges), expanded `sanitizeGraphXmlOutput` for body tags, and added entrypoint guards + `tests/*.test.mjs`.

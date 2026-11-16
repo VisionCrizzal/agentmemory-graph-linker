@@ -254,6 +254,26 @@ test("runBudgetSimulation and compactRedundantEdges (dryRun: false) work cleanly
     assert.equal(firstRecord.reason, "edge_compacted_budget");
     assert.equal(firstRecord.kind, "edge");
     assert.equal(engine.calls.applyRetrievalRecord.length, compacted.compactedCount);
+
+    // Compact output & skipSnapshot option check
+    rebuilt = false;
+    const secondPass = await compactRedundantEdges(
+      {
+        engine,
+        pageNodes: nodes,
+        graveyardPath,
+        rebuildSnapshot: async () => {
+          rebuilt = true;
+        }
+      },
+      { dryRun: false, targetMaxReads: 1, limit: 10, graveyardPath, skipSnapshot: true, compact: true }
+    );
+    assert.equal(secondPass.snapshotRebuilt, false);
+    assert.equal(rebuilt, false);
+    if (secondPass.compactedCount > 0) {
+      assert.equal("hotHubsBefore" in secondPass, false);
+      assert.equal("reason" in secondPass.compactedEdges[0], false);
+    }
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

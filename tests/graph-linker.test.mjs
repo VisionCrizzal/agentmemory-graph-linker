@@ -18,7 +18,10 @@ import {
   classifyNodeDomain,
   determineSemanticRelation,
   evaluateVerifyInvariants,
-  runVerifyJson
+  runVerifyJson,
+  parseFlagString,
+  findPositionalPayloadArg,
+  installSdkLogGuard
 } from "../skill/agentmemory-graph-linker/scripts/graph-linker.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -139,8 +142,8 @@ test("classifyNodeDomain and determineSemanticRelation classify domains and rela
   );
 });
 
-test("evaluateVerifyInvariants and runVerifyJson enforce non-destructive v4.0 verification gates", async () => {
-  assert.equal(VERSION, "4.0");
+test("evaluateVerifyInvariants and runVerifyJson enforce non-destructive v4.1 verification gates", async () => {
+  assert.equal(VERSION, "4.1");
   assert.equal(
     evaluateVerifyInvariants(
       { unlinkedCount: 0, globalDeg0Count: 0, incompleteRecords: 0, auditReducible: 0, truncated: true },
@@ -227,7 +230,7 @@ test("evaluateVerifyInvariants and runVerifyJson enforce non-destructive v4.0 ve
     );
 
     assert.equal(report.status, "verified");
-    assert.equal(report.version, "4.0");
+    assert.equal(report.version, "4.1");
     assert.equal(report.invariants.unlinkedCount, 0);
     assert.equal(report.invariants.globalDeg0Count, 0);
     assert.equal(report.invariants.incompleteRecords, 0);
@@ -238,7 +241,7 @@ test("evaluateVerifyInvariants and runVerifyJson enforce non-destructive v4.0 ve
   }
 });
 
-test("CLI --help prints v4.0 usage and unknown flags exit non-zero without touching live DB", async () => {
+test("CLI --help prints v4.1 usage and unknown flags exit non-zero without touching live DB", async () => {
   const isolatedDataDir = path.join(os.tmpdir(), `agm-isolated-${process.pid}`);
   const isolatedEnv = {
     ...process.env,
@@ -249,14 +252,18 @@ test("CLI --help prints v4.0 usage and unknown flags exit non-zero without touch
   const { stdout } = await execFileAsync(process.execPath, [GRAPH_LINKER_PATH, "--help"], {
     env: isolatedEnv
   });
-  assert.match(stdout, /AgentMemory Graph Linker v4\.0/);
+  assert.match(stdout, /AgentMemory Graph Linker v4\.1/);
   assert.match(stdout, /--verify-json/);
   assert.match(stdout, /--simulate-budget/);
   assert.match(stdout, /--compact-edges/);
   assert.match(stdout, /--suggest-merges/);
+  assert.match(stdout, /--auto-safe/);
   assert.match(stdout, /--merge-plan/);
   assert.match(stdout, /--suggest-links/);
+  assert.match(stdout, /--pair-mode/);
   assert.match(stdout, /--apply-temporal/);
+  assert.match(stdout, /--apply-and-compact/);
+  assert.match(stdout, /--quiet/);
   assert.equal(stdout.trim(), USAGE_TEXT.trim());
 
   await assert.rejects(
@@ -266,8 +273,42 @@ test("CLI --help prints v4.0 usage and unknown flags exit non-zero without touch
     (err) => {
       assert.notEqual(err.code, 0);
       assert.match(err.stderr, /Unknown flag: --not-a-valid-flag/);
-      assert.match(err.stderr, /AgentMemory Graph Linker v4\.0/);
+      assert.match(err.stderr, /AgentMemory Graph Linker v4\.1/);
       return true;
     }
   );
+});
+
+test("v4.1 CLI helpers parse flag values in any order and filter SDK OTel stdout chatter", () => {
+  const argv = ["--apply-and-compact", "--target-reads", "3700", "--merges", "m.json", "--auto-safe", "bundle.json"];
+  assert.equal(parseFlagString(argv, "--merges"), "m.json");
+  assert.equal(parseFlagString(argv, "--links"), null);
+  assert.equal(findPositionalPayloadArg(argv), "bundle.json");
+  assert.equal(
+    findPositionalPayloadArg(["--merge-plan", "--auto-safe", "--min-score", "0.7"]),
+    null
+  );
+
+  const captured = [];
+  const origLog = console.log;
+  const origDebug = console.debug;
+  const origWarn = console.warn;
+  console.log = (...parts) => captured.push(["log", parts.join(" ")]);
+  console.debug = (...parts) => captured.push(["debug", parts.join(" ")]);
+  console.warn = (...parts) => captured.push(["warn", parts.join(" ")]);
+
+  const restore = installSdkLogGuard({ suppressSdkStdout: true, verbose: false });
+  try {
+    console.debug("[iii] Worker registered with ID: abc");
+    console.log("[OTel] Connected to engine");
+    console.warn("[iii] Worker metrics disabled: OpenTelemetry not initialized.");
+    console.log('{"ok":true}');
+  } finally {
+    restore();
+    console.log = origLog;
+    console.debug = origDebug;
+    console.warn = origWarn;
+  }
+
+  assert.deepEqual(captured, [["log", '{"ok":true}']]);
 });

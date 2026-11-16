@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
- * AgentMemory Knowledge Graph Linker, Beautifier, Cleaner, Deduplicator & Healer (v4.0)
- * Hybrid Neuro-Symbolic / Verification-First & Zero-Token Graph Toolkit for Antigravity
+ * AgentMemory Knowledge Graph Linker, Beautifier, Cleaner, Deduplicator & Healer (v4.1)
+ * Hybrid Neuro-Symbolic / Verification-First & Token-Efficient Graph Toolkit for Antigravity
  *
  * Usage:
- *   node graph-linker.mjs --status
- *   node graph-linker.mjs --verify-json [--strict]
+ *   node graph-linker.mjs --status [--quiet|--json]
+ *   node graph-linker.mjs --verify-json [--strict] [--quiet|--json]
  *   node graph-linker.mjs --lock   [<reason>]
  *   node graph-linker.mjs --unlock
- *   node graph-linker.mjs --audit  [--days 14]
- *   node graph-linker.mjs --dedup
+ *   node graph-linker.mjs --audit  [--days 14] [--quiet|--json]
+ *   node graph-linker.mjs --dedup  [--auto-safe] [--quiet|--json]
  *   node graph-linker.mjs --rename "<old_name_or_id>" "<new_name>" [--type <new_type>]
  *   node graph-linker.mjs --prune  [--days 14] [--include-stale] [--include-hallucinations]
  *   node graph-linker.mjs --restore "<node_name_or_id|--last|--list>"
@@ -21,12 +21,13 @@
  *   node graph-linker.mjs --dump
  *   node graph-linker.mjs --apply '<json_relations_array_or_filepath>'
  *   node graph-linker.mjs --auto
- *   node graph-linker.mjs --simulate-budget [--limit N] [--target-reads N]
- *   node graph-linker.mjs --compact-edges [--apply] [--target-reads N] [--limit N]
- *   node graph-linker.mjs --suggest-merges [--limit N] [--min-score S]
- *   node graph-linker.mjs --merge-plan '<json_or_file>' [--dry-run]
- *   node graph-linker.mjs --suggest-links [--limit N]
- *   node graph-linker.mjs --apply-temporal '<json_or_file>' [--dry-run]
+ *   node graph-linker.mjs --simulate-budget [--limit N] [--target-reads N] [--quiet|--json]
+ *   node graph-linker.mjs --compact-edges [--apply] [--target-reads N] [--limit N] [--quiet|--json]
+ *   node graph-linker.mjs --suggest-merges [--limit N] [--min-score S] [--same-type-only] [--auto-safe] [--clusters-only] [--full] [--minify]
+ *   node graph-linker.mjs --merge-plan '<json_or_file>' [--auto-safe] [--dry-run] [--quiet|--json]
+ *   node graph-linker.mjs --suggest-links [--limit N] [--pair-mode] [--full] [--minify]
+ *   node graph-linker.mjs --apply-temporal '<json_or_file>' [--dry-run] [--quiet|--json]
+ *   node graph-linker.mjs --apply-and-compact ['<json_or_file>'] [--merges '<json_or_file>'] [--links '<json_or_file>'] [--auto-safe] [--target-reads N] [--limit N] [--dry-run] [--strict] [--quiet|--json]
  *   node graph-linker.mjs --help
  */
 
@@ -43,19 +44,20 @@ import {
   findSemanticDuplicateCandidates,
   applySemanticMergePlan,
   buildSemanticLinkBatch,
-  applyTemporalLinks
+  applyTemporalLinks,
+  runApplyAndCompactCycle
 } from "./semantic-planner.mjs";
 
-const VERSION = "4.0";
+const VERSION = "4.1";
 
 const USAGE_TEXT = `AgentMemory Graph Linker v${VERSION}
 Usage:
-  node graph-linker.mjs --status
-  node graph-linker.mjs --verify-json [--strict]
+  node graph-linker.mjs --status [--quiet|--json]
+  node graph-linker.mjs --verify-json [--strict] [--quiet|--json]
   node graph-linker.mjs --lock   [<reason>]
   node graph-linker.mjs --unlock
-  node graph-linker.mjs --audit  [--days 14]
-  node graph-linker.mjs --dedup
+  node graph-linker.mjs --audit  [--days 14] [--quiet|--json]
+  node graph-linker.mjs --dedup  [--auto-safe] [--quiet|--json]
   node graph-linker.mjs --rename "<old_name_or_id>" "<new_name>" [--type <new_type>]
   node graph-linker.mjs --prune  [--days 14] [--include-stale] [--include-hallucinations]
   node graph-linker.mjs --restore "<node_name_or_id|--last|--list>"
@@ -67,12 +69,13 @@ Usage:
   node graph-linker.mjs --dump
   node graph-linker.mjs --apply '<json_relations_array_or_filepath>'
   node graph-linker.mjs --auto
-  node graph-linker.mjs --simulate-budget [--limit N] [--target-reads N]
-  node graph-linker.mjs --compact-edges [--apply] [--target-reads N] [--limit N]
-  node graph-linker.mjs --suggest-merges [--limit N] [--min-score S]
-  node graph-linker.mjs --merge-plan '<json_or_file>' [--dry-run]
-  node graph-linker.mjs --suggest-links [--limit N]
-  node graph-linker.mjs --apply-temporal '<json_or_file>' [--dry-run]
+  node graph-linker.mjs --simulate-budget [--limit N] [--target-reads N] [--quiet|--json]
+  node graph-linker.mjs --compact-edges [--apply] [--target-reads N] [--limit N] [--quiet|--json]
+  node graph-linker.mjs --suggest-merges [--limit N] [--min-score S] [--same-type-only] [--auto-safe] [--clusters-only] [--full] [--minify]
+  node graph-linker.mjs --merge-plan '<json_or_file>' [--auto-safe] [--dry-run] [--quiet|--json]
+  node graph-linker.mjs --suggest-links [--limit N] [--pair-mode] [--full] [--minify]
+  node graph-linker.mjs --apply-temporal '<json_or_file>' [--dry-run] [--quiet|--json]
+  node graph-linker.mjs --apply-and-compact ['<json_or_file>'] [--merges '<json_or_file>'] [--links '<json_or_file>'] [--auto-safe] [--target-reads N] [--limit N] [--dry-run] [--strict] [--quiet|--json]
   node graph-linker.mjs --help`;
 
 const HOME = os.homedir();
@@ -551,11 +554,16 @@ function projectRecord(kind, id, input) {
   };
 }
 
-async function createGraphKvEngine(workerLabel = "graph-linker-v3") {
+async function createGraphKvEngine(workerLabel = "graph-linker-v4", options = {}) {
   const { registerWorker } = await import(III_SDK_PATH);
+  const otelEnabled =
+    typeof options.otelEnabled === "boolean"
+      ? options.otelEnabled
+      : process.env.OTEL_ENABLED === "true";
   const worker = registerWorker(III_WS_URL, {
     workerName: `${workerLabel}-${Date.now()}`,
-    namespace: III_NAMESPACE
+    namespace: III_NAMESPACE,
+    otel: { enabled: otelEnabled }
   });
 
   const genVal = await worker
@@ -3489,6 +3497,41 @@ function parseFlagNumber(args, flag, defaultValue) {
   return num;
 }
 
+function parseFlagString(args, flag) {
+  const idx = args.indexOf(flag);
+  if (idx === -1) return null;
+  const raw = args[idx + 1];
+  if (raw === undefined || raw.startsWith("--")) {
+    throw new Error(`Missing value for ${flag}`);
+  }
+  return raw;
+}
+
+const VALUE_FLAGS = new Set([
+  "--merges",
+  "--links",
+  "--target-reads",
+  "--limit",
+  "--query-limit",
+  "--min-score",
+  "--max-hub-groups",
+  "--days",
+  "--type"
+]);
+
+function findPositionalPayloadArg(args) {
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i];
+    if (VALUE_FLAGS.has(a)) {
+      i += 1;
+      continue;
+    }
+    if (a.startsWith("--")) continue;
+    return a;
+  }
+  return null;
+}
+
 function parseJsonOrFileArg(rawArg, usageHint) {
   if (!rawArg) throw new Error(usageHint);
   let text = rawArg;
@@ -3500,6 +3543,41 @@ function parseJsonOrFileArg(rawArg, usageHint) {
   } catch (err) {
     throw new Error(`Invalid JSON payload (${err.message})`);
   }
+}
+
+function emitJsonOutput(payload, minify = false) {
+  process.stdout.write(JSON.stringify(payload, null, minify ? 0 : 2) + "\n");
+}
+
+function installSdkLogGuard({ suppressSdkStdout = false, verbose = false } = {}) {
+  if (!suppressSdkStdout) return () => {};
+  const origDebug = console.debug;
+  const origLog = console.log;
+  const origWarn = console.warn;
+  const isSdkNoise = (firstArg) =>
+    typeof firstArg === "string" && /^\[(OTel|iii)\]/.test(firstArg);
+  console.debug = (...parts) => {
+    if (verbose) process.stderr.write(parts.join(" ") + "\n");
+  };
+  console.log = (...parts) => {
+    if (isSdkNoise(parts[0])) {
+      if (verbose) process.stderr.write(parts.join(" ") + "\n");
+      return;
+    }
+    origLog(...parts);
+  };
+  console.warn = (...parts) => {
+    if (isSdkNoise(parts[0])) {
+      if (verbose) process.stderr.write(parts.join(" ") + "\n");
+      return;
+    }
+    origWarn(...parts);
+  };
+  return () => {
+    console.debug = origDebug;
+    console.log = origLog;
+    console.warn = origWarn;
+  };
 }
 
 function toFiniteIntOrNegativeOne(value) {
@@ -3705,7 +3783,9 @@ async function main() {
     "--suggest-merges",
     "--merge-plan",
     "--suggest-links",
-    "--apply-temporal"
+    "--apply-temporal",
+    "--apply-and-compact",
+    "--cycle"
   ]);
 
   if (!KNOWN_MODES.has(mode)) {
@@ -3713,6 +3793,28 @@ async function main() {
       `Unknown flag: ${mode}.\n\n${USAGE_TEXT}`
     );
   }
+
+  const JSON_CLEAN_MODES = new Set([
+    "--verify-json",
+    "--status",
+    "--audit",
+    "--dedup",
+    "--simulate-budget",
+    "--compact-edges",
+    "--suggest-merges",
+    "--merge-plan",
+    "--suggest-links",
+    "--apply-temporal",
+    "--apply-and-compact",
+    "--cycle"
+  ]);
+  const minifyOutput = args.includes("--minify");
+  const quietMode = args.includes("--quiet") || args.includes("--json");
+  const verboseMode = args.includes("--verbose");
+  const restoreConsole = installSdkLogGuard({
+    suppressSdkStdout: !verboseMode && (quietMode || JSON_CLEAN_MODES.has(mode)),
+    verbose: verboseMode
+  });
 
   if (mode === "--lock") {
     fs.writeFileSync(
@@ -3771,26 +3873,27 @@ async function main() {
 
   const secret = getSecret();
 
-  if (mode === "--verify-json") {
-    const strict = args.includes("--strict");
-    const days = parseFlagNumber(args, "--days", 14);
-    const report = await runVerifyJson({ secret }, { strict, days });
-    console.log(JSON.stringify(report, null, 2));
-    process.exit(report.status === "verified" ? 0 : 1);
-  }
+  try {
+    if (mode === "--verify-json") {
+      const strict = args.includes("--strict");
+      const days = parseFlagNumber(args, "--days", 14);
+      const report = await runVerifyJson({ secret }, { strict, days });
+      emitJsonOutput(report, minifyOutput);
+      restoreConsole();
+      process.exit(report.status === "verified" ? 0 : 1);
+    }
 
-  if (mode === "--status") {
-    const { data, nodes, edges, unlinked, degrees } = await queryGraph(secret);
-    const edgeTypes = {};
-    for (const e of edges) edgeTypes[e.type] = (edgeTypes[e.type] || 0) + 1;
-    const degValues = Object.values(degrees);
-    const maxDeg = degValues.length ? Math.max(...degValues) : 0;
-    const avgDeg = degValues.length
-      ? (degValues.reduce((a, b) => a + b, 0) / degValues.length).toFixed(1)
-      : 0;
+    if (mode === "--status") {
+      const { data, nodes, edges, unlinked, degrees } = await queryGraph(secret);
+      const edgeTypes = {};
+      for (const e of edges) edgeTypes[e.type] = (edgeTypes[e.type] || 0) + 1;
+      const degValues = Object.values(degrees);
+      const maxDeg = degValues.length ? Math.max(...degValues) : 0;
+      const avgDeg = degValues.length
+        ? (degValues.reduce((a, b) => a + b, 0) / degValues.length).toFixed(1)
+        : 0;
 
-    console.log(
-      JSON.stringify(
+      emitJsonOutput(
         {
           version: VERSION,
           maintenanceLockActive: fs.existsSync(MAINTENANCE_LOCK_PATH),
@@ -3810,63 +3913,90 @@ async function main() {
             .slice(0, 15)
             .map((n) => ({ idx: n.idx, name: n.name, type: n.type }))
         },
-        null,
-        2
-      )
-    );
-    return;
-  }
+        minifyOutput
+      );
+      return;
+    }
 
-  if (mode === "--audit") {
-    const days = parseFlagNumber(args, "--days", 14);
-    const engine = await createGraphKvEngine("graph-linker-audit");
-    const audit = await performGraphAudit(engine, { days });
-    console.log(
-      JSON.stringify(
-        {
-          status: "audit_completed",
-          version: VERSION,
-          summary: audit.summary,
-          sampleDuplicateGroups: audit.mergeGroups.slice(0, 20).map((g) => ({
-            groupKey: g.groupKey,
-            canonicalName: g.canonicalName,
-            canonicalId: g.canonicalNode.id,
-            duplicatesCount: g.duplicates.length,
-            duplicateNames: g.duplicates.slice(0, 5).map((d) => d.name)
-          })),
-          hallucinationCandidates: audit.hallucinationCandidates.slice(0, 25),
-          sampleTransientScratch: audit.transientScratchCandidates.slice(0, 20),
-          sampleStaleIsolated: audit.staleIsolatedCandidates.slice(0, 20)
-        },
-        null,
-        2
-      )
-    );
-    process.exit(0);
-  }
+    if (mode === "--audit") {
+      const days = parseFlagNumber(args, "--days", 14);
+      const engine = await createGraphKvEngine("graph-linker-audit");
+      try {
+        const audit = await performGraphAudit(engine, { days });
+        emitJsonOutput(
+          {
+            status: "audit_completed",
+            version: VERSION,
+            summary: audit.summary,
+            sampleDuplicateGroups: audit.mergeGroups.slice(0, 20).map((g) => ({
+              groupKey: g.groupKey,
+              canonicalName: g.canonicalName,
+              canonicalId: g.canonicalNode.id,
+              duplicatesCount: g.duplicates.length,
+              duplicateNames: g.duplicates.slice(0, 5).map((d) => d.name)
+            })),
+            hallucinationCandidates: audit.hallucinationCandidates.slice(0, 25),
+            sampleTransientScratch: audit.transientScratchCandidates.slice(0, 20),
+            sampleStaleIsolated: audit.staleIsolatedCandidates.slice(0, 20)
+          },
+          minifyOutput
+        );
+      } finally {
+        if (engine?.worker?.shutdown) {
+          await engine.worker.shutdown().catch(() => {});
+        }
+      }
+      restoreConsole();
+      process.exit(0);
+    }
 
-  if (mode === "--dedup") {
-    applySystemAndRamPatches({ tuneRamEnv: false });
-    const engine = await createGraphKvEngine("graph-linker-dedup");
-    const report = await executeDeduplication(engine);
-    const after = await queryGraph(secret);
-    console.log(
-      JSON.stringify(
-        {
-          status: "deduplicated",
-          version: VERSION,
-          ...report,
-          graveyardFile: GRAVEYARD_PATH,
-          viewNodes: after.nodes.length,
-          viewEdges: after.edges.length,
-          remainingUnlinked: after.unlinked.length
-        },
-        null,
-        2
-      )
-    );
-    process.exit(0);
-  }
+    if (mode === "--dedup") {
+      applySystemAndRamPatches({ tuneRamEnv: false });
+      const engine = await createGraphKvEngine("graph-linker-dedup");
+      try {
+        const report = await executeDeduplication(engine);
+        let autoSafeReport = null;
+        if (args.includes("--auto-safe")) {
+          const minScore = parseFlagNumber(args, "--min-score", 0.65);
+          const scan = await findSemanticDuplicateCandidates(
+            { engine },
+            {
+              limit: 250,
+              minScore,
+              includeCrossType: false,
+              autoSafeOnly: true,
+              compact: true
+            }
+          );
+          if (scan.autoSafePlan.length > 0) {
+            autoSafeReport = await applySemanticMergePlan(
+              { engine, secret, baseUrl: BASE_URL, graveyardPath: GRAVEYARD_PATH, rebuildSnapshot },
+              scan.autoSafePlan
+            );
+          }
+        }
+        const after = await queryGraph(secret);
+        emitJsonOutput(
+          {
+            status: "deduplicated",
+            version: VERSION,
+            ...report,
+            ...(autoSafeReport ? { autoSafeMerges: autoSafeReport } : {}),
+            graveyardFile: GRAVEYARD_PATH,
+            viewNodes: after.nodes.length,
+            viewEdges: after.edges.length,
+            remainingUnlinked: after.unlinked.length
+          },
+          minifyOutput
+        );
+      } finally {
+        if (engine?.worker?.shutdown) {
+          await engine.worker.shutdown().catch(() => {});
+        }
+      }
+      restoreConsole();
+      process.exit(0);
+    }
 
   if (mode === "--rename") {
     applySystemAndRamPatches({ tuneRamEnv: false });
@@ -4083,82 +4213,194 @@ async function main() {
     return;
   }
 
-  if (mode === "--simulate-budget") {
-    const limit = parseFlagNumber(args, "--limit", 250);
-    const targetMaxReads = parseFlagNumber(args, "--target-reads", 3800);
-    const queryLimit = parseFlagNumber(args, "--query-limit", 500);
-    const report = await withGraphDeps("graph-linker-simulate-budget", secret, (deps) =>
-      runBudgetSimulation(deps, { limit, targetMaxReads, queryLimit })
-    );
-    console.log(JSON.stringify({ version: VERSION, ...report }, null, 2));
-    return;
-  }
+    if (mode === "--simulate-budget") {
+      const limit = parseFlagNumber(args, "--limit", 250);
+      const targetMaxReads = parseFlagNumber(args, "--target-reads", 3800);
+      const queryLimit = parseFlagNumber(args, "--query-limit", 500);
+      const report = await withGraphDeps("graph-linker-simulate-budget", secret, (deps) =>
+        runBudgetSimulation(deps, { limit, targetMaxReads, queryLimit })
+      );
+      emitJsonOutput({ version: VERSION, ...report }, minifyOutput);
+      return;
+    }
 
-  if (mode === "--compact-edges") {
-    const dryRun = !args.includes("--apply");
-    const targetMaxReads = parseFlagNumber(args, "--target-reads", 3800);
-    const limit = parseFlagNumber(args, "--limit", 250);
-    const queryLimit = parseFlagNumber(args, "--query-limit", 500);
-    const report = await withGraphDeps("graph-linker-compact-edges", secret, (deps) =>
-      compactRedundantEdges(deps, { dryRun, targetMaxReads, limit, queryLimit })
-    );
-    console.log(JSON.stringify({ version: VERSION, ...report }, null, 2));
-    return;
-  }
+    if (mode === "--compact-edges") {
+      const dryRun = !args.includes("--apply");
+      const targetMaxReads = parseFlagNumber(args, "--target-reads", 3800);
+      const limit = parseFlagNumber(args, "--limit", 250);
+      const queryLimit = parseFlagNumber(args, "--query-limit", 500);
+      const compact = !args.includes("--full");
+      const report = await withGraphDeps("graph-linker-compact-edges", secret, (deps) =>
+        compactRedundantEdges(deps, { dryRun, targetMaxReads, limit, queryLimit, compact })
+      );
+      emitJsonOutput({ version: VERSION, ...report }, minifyOutput);
+      return;
+    }
 
-  if (mode === "--suggest-merges") {
-    const limit = parseFlagNumber(args, "--limit", 50);
-    const minScore = parseFlagNumber(args, "--min-score", 0.45);
-    const includeCrossType = !args.includes("--same-type-only");
-    const report = await withGraphDeps("graph-linker-suggest-merges", secret, (deps) =>
-      findSemanticDuplicateCandidates(deps, { limit, minScore, includeCrossType })
-    );
-    console.log(JSON.stringify({ version: VERSION, ...report }, null, 2));
-    return;
-  }
+    if (mode === "--suggest-merges") {
+      const limit = parseFlagNumber(args, "--limit", 50);
+      const minScore = parseFlagNumber(args, "--min-score", 0.6);
+      const includeCrossType = !args.includes("--same-type-only");
+      const compact = !args.includes("--full");
+      const autoSafeOnly = args.includes("--auto-safe");
+      const clustersOnly = args.includes("--clusters-only");
+      const report = await withGraphDeps("graph-linker-suggest-merges", secret, (deps) =>
+        findSemanticDuplicateCandidates(deps, {
+          limit,
+          minScore,
+          includeCrossType,
+          compact,
+          autoSafeOnly,
+          clustersOnly
+        })
+      );
+      emitJsonOutput({ version: VERSION, ...report }, minifyOutput);
+      return;
+    }
 
-  if (mode === "--merge-plan") {
-    const payloadArg = args
-      .slice(1)
-      .find((a) => a !== "--dry-run" && a !== "--apply");
-    const planItems = parseJsonOrFileArg(
-      payloadArg,
-      "Usage: graph-linker.mjs --merge-plan '<json_or_file>' [--dry-run]"
-    );
-    const dryRun = args.includes("--dry-run");
-    const report = await withGraphDeps("graph-linker-merge-plan", secret, (deps) =>
-      applySemanticMergePlan(deps, planItems, { dryRun })
-    );
-    console.log(JSON.stringify({ version: VERSION, ...report }, null, 2));
-    return;
-  }
+    if (mode === "--merge-plan") {
+      const autoSafe = args.includes("--auto-safe");
+      const payloadArg = findPositionalPayloadArg(args);
+      if (!payloadArg && !autoSafe) {
+        throw new Error(
+          "Usage: graph-linker.mjs --merge-plan '<json_or_file>' [--auto-safe] [--dry-run]"
+        );
+      }
+      const explicitPlan = payloadArg
+        ? parseJsonOrFileArg(
+            payloadArg,
+            "Usage: graph-linker.mjs --merge-plan '<json_or_file>' [--auto-safe] [--dry-run]"
+          )
+        : [];
+      const dryRun = args.includes("--dry-run");
+      const minScore = parseFlagNumber(args, "--min-score", 0.65);
+      const report = await withGraphDeps("graph-linker-merge-plan", secret, async (deps) => {
+        let items = Array.isArray(explicitPlan)
+          ? explicitPlan
+          : explicitPlan?.plan || explicitPlan?.merges || [];
+        let autoSafeCandidateCount = 0;
+        if (autoSafe) {
+          const scan = await findSemanticDuplicateCandidates(deps, {
+            limit: 250,
+            minScore,
+            includeCrossType: false,
+            autoSafeOnly: true,
+            compact: true
+          });
+          const seen = new Set(
+            items.map((i) => String(typeof i?.merge === "object" ? i.merge?.id || i.merge?.name : i?.merge))
+          );
+          const autoItems = (scan.autoSafePlan || []).filter((a) => !seen.has(String(a.merge)));
+          autoSafeCandidateCount = autoItems.length;
+          items = [...items, ...autoItems];
+        }
+        const mergeRes = await applySemanticMergePlan(deps, items, { dryRun });
+        return autoSafe ? { ...mergeRes, autoSafeCandidateCount } : mergeRes;
+      });
+      emitJsonOutput({ version: VERSION, ...report }, minifyOutput);
+      return;
+    }
 
-  if (mode === "--suggest-links") {
-    const limit = parseFlagNumber(args, "--limit", 40);
-    const report = await withGraphDeps("graph-linker-suggest-links", secret, (deps) =>
-      buildSemanticLinkBatch(deps, { limit })
-    );
-    console.log(JSON.stringify({ version: VERSION, ...report }, null, 2));
-    return;
-  }
+    if (mode === "--suggest-links") {
+      const limit = parseFlagNumber(args, "--limit", 40);
+      const compact = !args.includes("--full");
+      const pairMode = args.includes("--pair-mode");
+      const maxHubGroups = parseFlagNumber(args, "--max-hub-groups", 8);
+      const report = await withGraphDeps("graph-linker-suggest-links", secret, (deps) =>
+        buildSemanticLinkBatch(deps, { limit, compact, pairMode, maxHubGroups })
+      );
+      emitJsonOutput({ version: VERSION, ...report }, minifyOutput);
+      return;
+    }
 
-  if (mode === "--apply-temporal") {
-    const payloadArg = args
-      .slice(1)
-      .find((a) => a !== "--dry-run" && a !== "--apply");
-    const triples = parseJsonOrFileArg(
-      payloadArg,
-      "Usage: graph-linker.mjs --apply-temporal '<json_or_file>' [--dry-run]"
-    );
-    const dryRun = args.includes("--dry-run");
-    const report = await withGraphDeps("graph-linker-apply-temporal", secret, (deps) =>
-      applyTemporalLinks(deps, triples, { dryRun })
-    );
-    console.log(JSON.stringify({ version: VERSION, ...report }, null, 2));
-    return;
-  }
+    if (mode === "--apply-temporal") {
+      const payloadArg = findPositionalPayloadArg(args);
+      const triples = parseJsonOrFileArg(
+        payloadArg,
+        "Usage: graph-linker.mjs --apply-temporal '<json_or_file>' [--dry-run]"
+      );
+      const dryRun = args.includes("--dry-run");
+      const report = await withGraphDeps("graph-linker-apply-temporal", secret, (deps) =>
+        applyTemporalLinks(deps, triples, { dryRun })
+      );
+      emitJsonOutput({ version: VERSION, ...report }, minifyOutput);
+      return;
+    }
 
-  throw new Error(`Unknown flag: ${mode}.\n\n${USAGE_TEXT}`);
+    if (mode === "--apply-and-compact" || mode === "--cycle") {
+      const mergesArg = parseFlagString(args, "--merges");
+      const linksArg = parseFlagString(args, "--links");
+      const positionalArg = findPositionalPayloadArg(args);
+      const autoSafeMerges = args.includes("--auto-safe");
+      const dryRun = args.includes("--dry-run");
+      const strict = args.includes("--strict");
+      const compact = !args.includes("--full");
+      const targetMaxReads = parseFlagNumber(args, "--target-reads", 3800);
+      const limit = parseFlagNumber(args, "--limit", 500);
+      const queryLimit = parseFlagNumber(args, "--query-limit", 500);
+      const minAutoScore = parseFlagNumber(args, "--min-score", 0.65);
+
+      let mergePlan = mergesArg
+        ? parseJsonOrFileArg(mergesArg, "Invalid --merges JSON/file")
+        : [];
+      let links = linksArg
+        ? parseJsonOrFileArg(linksArg, "Invalid --links JSON/file")
+        : [];
+      let bundleAutoSafe = autoSafeMerges;
+
+      if (positionalArg) {
+        const bundle = parseJsonOrFileArg(
+          positionalArg,
+          "Usage: graph-linker.mjs --apply-and-compact ['<json_or_file>'] [--merges ...] [--links ...] [--auto-safe] [--target-reads N] [--dry-run]"
+        );
+        if (Array.isArray(bundle)) {
+          const looksLikeMerges = bundle.some((x) => x && ("keep" in x || "merge" in x));
+          if (looksLikeMerges && !mergesArg) mergePlan = bundle;
+          else if (!linksArg) links = bundle;
+        } else if (bundle && typeof bundle === "object") {
+          if (!mergesArg && (bundle.mergePlan || bundle.merges || bundle.plan)) {
+            mergePlan = bundle.mergePlan || bundle.merges || bundle.plan;
+          }
+          if (!linksArg && (bundle.links || bundle.triples)) {
+            links = bundle.links || bundle.triples;
+          }
+          if (typeof bundle.autoSafeMerges === "boolean" && !autoSafeMerges) {
+            bundleAutoSafe = bundle.autoSafeMerges;
+          }
+        }
+      }
+
+      const report = await withGraphDeps("graph-linker-cycle", secret, (deps) =>
+        runApplyAndCompactCycle(deps, {
+          mergePlan,
+          links,
+          autoSafeMerges: bundleAutoSafe,
+          dryRun,
+          targetMaxReads,
+          limit,
+          queryLimit,
+          minAutoScore,
+          compact,
+          strict,
+          runVerifyFn: (d, verifyOpts) =>
+            runVerifyJson(
+              { engine: d.engine, secret: d.secret, baseUrl: d.baseUrl },
+              verifyOpts
+            )
+        })
+      );
+      emitJsonOutput(report, minifyOutput);
+      if (!dryRun && strict && report.verification?.status === "failed") {
+        restoreConsole();
+        process.exit(1);
+      }
+      return;
+    }
+
+    throw new Error(`Unknown flag: ${mode}.\n\n${USAGE_TEXT}`);
+  } finally {
+    restoreConsole();
+  }
 }
 
 export {
@@ -4208,6 +4450,9 @@ export {
   applyDirectXmlLinks,
   rebuildSnapshot,
   parseFlagNumber,
+  parseFlagString,
+  findPositionalPayloadArg,
+  installSdkLogGuard,
   parseJsonOrFileArg,
   evaluateVerifyInvariants,
   runVerifyJson,

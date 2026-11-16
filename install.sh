@@ -7,7 +7,7 @@ GEMINI_SKILL_DIR="$HOME/.gemini/config/skills/agentmemory-graph-linker"
 CLAUDE_SKILL_DIR="$HOME/.claude/skills/agentmemory-graph-linker"
 AGENTMEMORY_DIR="$HOME/.agentmemory"
 
-echo "==> Installing agentmemory-graph-linker skill (v4.0)..."
+echo "==> Installing agentmemory-graph-linker skill (v4.1)..."
 mkdir -p "$HOME/.agents/skills" "$HOME/.gemini/config/skills" "$HOME/.claude/skills" "$AGENTMEMORY_DIR"
 rm -rf "$AGENTS_SKILL_DIR"
 cp -R "$REPO_DIR/skill/agentmemory-graph-linker" "$AGENTS_SKILL_DIR"

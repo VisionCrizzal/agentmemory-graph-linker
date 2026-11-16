@@ -1,4 +1,4 @@
-# AgentMemory Knowledge Graph Linker, Semantic Planner, Edge Compactor & Smart AI Router (v4.0)
+# AgentMemory Knowledge Graph Linker, Semantic Planner, Edge Compactor & Smart AI Router (v4.1)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Companion for AgentMemory](https://img.shields.io/badge/Companion%20For-rohitg00%2Fagentmemory-blue.svg)](https://github.com/rohitg00/agentmemory)
@@ -10,7 +10,7 @@
 > Bộ công cụ này là skill bổ trợ thiết kế đặc thù cho dự án mã nguồn mở **[AgentMemory (`rohitg00/agentmemory`)](https://github.com/rohitg00/agentmemory)**.
 > Skill tương tác trực tiếp với daemon `@agentmemory/agentmemory`, kết nối WebSocket qua `iii-sdk` (`ws://127.0.0.1:49134`) và đồ thị tri thức (`http://localhost:3113/#graph`). Máy cần cài đặt và chạy [AgentMemory](https://github.com/rohitg00/agentmemory) trước khi sử dụng.
 
-Bộ công cụ **Hybrid Neuro-Symbolic Antigravity Skill (`agentmemory-graph-linker`)** kèm **Task-Aware Smart AI Router (v4.0)** tối ưu cho **Gemini 4 Hydrogen**: kết hợp kiểm toán đồ thị 0 token, mô phỏng ngân sách đọc `maxReads: 4096`, nén cạnh dư thừa an toàn (`edge-compactor.mjs`), lập kế hoạch gộp từ đồng nghĩa & liên kết hai chiều thời gian bi-temporal (`semantic-planner.mjs`), lưu trữ **Thùng Rác Lạnh (`~/.agentmemory/graveyard.jsonl`)** có thể khôi phục bằng `--restore`, tối ưu RAM/log cho `iii-engine`, và cổng kiểm định bắt buộc `--verify-json [--strict]` — đồng thời giữ nguyên tương thích `--beautify` / `--auto` tốn 0 token.
+Bộ công cụ **Hybrid Neuro-Symbolic Antigravity Skill (`agentmemory-graph-linker` v4.1)** kèm **Task-Aware Smart AI Router** tối ưu cho **Gemini 4 Hydrogen**: kết hợp kiểm toán đồ thị 0 token, mô phỏng ngân sách đọc `maxReads: 4096`, xuất ứng viên rút gọn tiết kiệm token (`hubCatalog`, `--auto-safe`, `--pair-mode`, gom cụm `clusters`), nén cạnh dư thừa an toàn (`edge-compactor.mjs`), thực thi 1 lệnh `--apply-and-compact`, **Thùng Rác Lạnh (`~/.agentmemory/graveyard.jsonl`)** có thể `--restore`, tối ưu RAM/log cho `iii-engine`, và cổng kiểm định `--verify-json [--strict]` — đồng thời giữ nguyên tương thích `--beautify` / `--auto` tốn 0 token.
 
 ---
 
@@ -84,19 +84,20 @@ SCRIPT=~/.gemini/config/skills/agentmemory-graph-linker/scripts/graph-linker.mjs
 node "$SCRIPT" --status
 node "$SCRIPT" --verify-json [--strict]
 
-# 2. Trích xuất ứng viên tốn 0 token & mô phỏng ngân sách đọc 4096
+# 2. Trích xuất ứng viên rút gọn (mặc định xuất JSON gọn, không lẫn log [OTel]) & mô phỏng ngân sách
 node "$SCRIPT" --audit [--days 14]
 node "$SCRIPT" --simulate-budget [--limit N] [--target-reads N] [--query-limit N]
-node "$SCRIPT" --suggest-merges [--limit N] [--min-score S] [--same-type-only]
-node "$SCRIPT" --suggest-links [--limit N]
+node "$SCRIPT" --suggest-merges [--limit N] [--min-score S] [--same-type-only] [--auto-safe] [--clusters-only] [--full] [--minify]
+node "$SCRIPT" --suggest-links [--limit N] [--pair-mode] [--full] [--minify]
 
-# 3. Thực thi nguyên tử trên 5 tầng KV + Thùng Rác Lạnh
+# 3. Thực thi nguyên tử trên 5 tầng KV + pipeline gộp 1 lệnh
 node "$SCRIPT" --lock "Manual refactoring"
-node "$SCRIPT" --dedup
-node "$SCRIPT" --merge-plan '<json_or_file>' [--dry-run]
+node "$SCRIPT" --dedup [--auto-safe]
+node "$SCRIPT" --merge-plan '<json_or_file>' [--auto-safe] [--dry-run]
 node "$SCRIPT" --prune [--days 14] [--include-stale] [--include-hallucinations] [--no-hallucinations]
 node "$SCRIPT" --apply-temporal '<json_or_file>' [--dry-run]
-node "$SCRIPT" --compact-edges [--apply] [--target-reads N] [--limit N] [--query-limit N]
+node "$SCRIPT" --compact-edges [--apply] [--target-reads N] [--limit N] [--query-limit N] [--full]
+node "$SCRIPT" --apply-and-compact ['<json_or_file>'] [--merges '<json_or_file>'] [--links '<json_or_file>'] [--auto-safe] [--target-reads N] [--limit N] [--dry-run] [--strict]
 node "$SCRIPT" --unlock
 
 # 4. Đổi tên tại chỗ, khôi phục từ Thùng Rác Lạnh & xóa node chỉ định
@@ -124,6 +125,9 @@ node "$SCRIPT" --verify-json --strict
 
 ## 📋 Changelog (Lịch sử phiên bản)
 
+- **v4.1 (2026-11-16)**:
+  - **Tối ưu token khi gom & lọc ứng viên (`--suggest-merges`, `--suggest-links`, `--auto-safe`)**: Mặc định xuất payload gọn (`--full` để lấy chi tiết), bỏ mảng `sourceObservationIds` dư thừa, gom `hubCatalog` một lần ở root, gom cặp đồng nghĩa thành cụm N-node (`clusters`), tách sẵn các ca an toàn tuyệt đối (`--auto-safe` có chốt chặn lệch số phiên bản/tên file), và tắt nhiễu `[OTel]`/`[iii]` trên stdout để parse JSON trực tiếp.
+  - **Nhận diện cặp lá hạ budget & pipeline 1 lệnh (`--pair-mode`, `--apply-and-compact`)**: Tách rõ `trulyIsolatedCount` (`globalDegree === 0`) với node chỉ khuất khỏi top-500 (`viewOnlyUnlinkedCount`), gợi ý các cụm lá `deg=2` dính `hotHub` qua cạnh yếu (`hubLeafGroups`, dự báo `-4` hoặc `-2` reads ròng), và gom `merge + link + compact + 1 lần rebuild snapshot + verify` vào một lệnh `--apply-and-compact` duy nhất.
 - **v4.0 (2026-11-13)**:
   - **Nâng cấp Hybrid Neuro-Symbolic (Gemini 4 Hydrogen)**: Bổ sung `edge-compactor.mjs` (`--simulate-budget`, `--compact-edges [--apply]`), `semantic-planner.mjs` (`--suggest-merges`, `--merge-plan`, `--suggest-links`, `--apply-temporal`) và cổng kiểm định `--verify-json [--strict]`.
   - **Task-Aware Smart AI Router v4.0**: Tách `FAST_MODEL_ORDER` và `ACCURACY_MODEL_ORDER` (`selectTargetsForFormat`), bổ sung `gemini-flash-latest`, sửa lỗi fallback `<observation>` bị gán cứng `.env`, hỗ trợ làm sạch thẻ XML `<entity>`/`<relationship>` có thân thẻ, và thêm entrypoint guard + bộ `tests/*.test.mjs`.
